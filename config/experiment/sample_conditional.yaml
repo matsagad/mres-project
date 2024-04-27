@@ -1,0 +1,8 @@
+
+defaults:
+  - conditional_method: "smcdiff"
+
+name: "sample_conditional"
+n_samples: 16
+sample_length: 128
+motif: ???

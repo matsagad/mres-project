@@ -1,0 +1,9 @@
+
+# @package _global_
+experiment:
+  name: "none"
+  
+hydra:
+  output_subdir: null
+  run:
+    dir: .

@@ -1,0 +1,19 @@
+
+defaults:
+  - _self_
+  - model: "genie-scope-128"
+  - experiment: "none"
+
+model:
+  batch_size: 5
+  device: "cuda:1"
+  max_n_residues: ???
+
+experiment:
+  name: ???
+
+hydra:
+  help:
+    app_name: "Motif-scaffolding experiments"
+  run:
+    dir: "outputs/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}"

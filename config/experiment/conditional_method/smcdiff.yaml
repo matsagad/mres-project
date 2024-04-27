@@ -1,0 +1,6 @@
+
+name: "smcdiff"
+noisy_motif: True
+replacement_weight: 1
+n_particles: ${experiment.n_samples}
+resampling_method: "residual"
