@@ -23,14 +23,14 @@ def residual_resample(w: Tensor) -> Tensor:
     return torch.cat((i_R, i_C))
 
 
-def stratified_resample(w):
+def stratified_resample(w: Tensor) -> Tensor:
     K = w.shape[0]
     w_cumsum = torch.cumsum(w, 0)
     samples = (torch.rand(K) + torch.arange(K).float()) / K
     return torch.searchsorted(w_cumsum, samples.to(w.device))
 
 
-def systematic_resample(w):
+def systematic_resample(w: Tensor) -> Tensor:
     K = w.shape[0]
     w_cumsum = torch.cumsum(w, 0)
     samples = (torch.rand(1) + torch.arange(K).float()) / K
