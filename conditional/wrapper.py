@@ -8,14 +8,36 @@ import tqdm
 class ConditionalWrapper(ABC):
     def __init__(self, model: FrameDiffusionModel) -> None:
         self.model = model
+        self.device = model.device
+        self.verbose = True
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @device.setter
+    def device(self, _device: int) -> None:
+        self._device = _device
+
+    @property
+    def verbose(self) -> bool:
+        return self._verbose
+
+    @verbose.setter
+    def verbose(self, _verbose: bool) -> None:
+        self._verbose = _verbose
 
     @abstractmethod
-    def sample_given_motif(self):
+    def sample_given_motif(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor
+    ) -> Tensor:
         """Sample conditioned on motif being present"""
         raise NotImplementedError
 
-    def sample(self, mask: Tensor, noise_scale: float, verbose=True) -> Tensor:
+    def sample(self, mask: Tensor) -> Tensor:
         """Unconditional"""
+        NOISE_SCALE = self.model.noise_scale
+
         if not self.model.setup:
             self.setup_schedule()
 
@@ -28,10 +50,10 @@ class ConditionalWrapper(ABC):
                 reversed(range(self.model.n_timesteps)),
                 desc="Reverse diffuse samples",
                 total=self.model.n_timesteps,
-                disable=not verbose,
+                disable=not self.verbose,
             ):
                 t = torch.tensor([i] * mask.shape[0], device=self.device).long()
-                x_t = self.model.reverse_diffuse(x_t, t, mask, noise_scale)
+                x_t = self.model.reverse_diffuse(x_t, t, mask, noise_scale=NOISE_SCALE)
                 x_trajectory.append(x_t)
 
         return x_trajectory
