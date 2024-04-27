@@ -1,21 +1,24 @@
-from typing import Any
-from genie.genie.config import Config
-from genie.genie.diffusion.genie import Genie
+from genie.config import Config
+from genie.diffusion.genie import Genie
+from genie.utils.geo_utils import compute_frenet_frames
+from genie.utils.affine_utils import T
 from model.diffusion import FrameDiffusionModel
 from protein.frames import Frames
-from torch import Tensor
 import torch
+from torch import Tensor
+from typing import Union
 
 
 class GenieAdapter(FrameDiffusionModel):
     def __init__(self, model: Genie) -> None:
+        super().__init__()
         self.model = model
+
         self.batch_size = 5
         self.n_timesteps = model.config.diffusion["n_timestep"]
+        self.max_n_residues = model.config.io["max_n_res"]
 
-    def with_batch_size(self, batch_size: int) -> "GenieAdapter":
-        self.batch_size = batch_size
-        return self
+        self.setup_schedule()
 
     def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
         config = Config(f_config)
@@ -26,6 +29,18 @@ class GenieAdapter(FrameDiffusionModel):
         self.model.setup_schedule()
         self.setup = True
 
+    def _setup_on_device(self) -> None:
+        attrs = [
+            "alphas",
+            "sqrt_alphas",
+            "sqrt_alphas_cumprod",
+            "sqrt_one_minus_alphas_cumprod",
+            "betas",
+            "sqrt_betas",
+        ]
+        for attr in attrs:
+            setattr(self.model, attr, getattr(self.model, attr).to(self.device))
+
     def transform(self, batch: Tensor) -> Tensor:
         return self.model.transform(batch)
 
@@ -35,9 +50,20 @@ class GenieAdapter(FrameDiffusionModel):
     def sample_frames(self, mask: Tensor) -> Frames:
         return self.model.sample_frames(mask)
 
+    def coords_to_frames(self, coords: Tensor, mask: Tensor) -> Frames:
+        rots = compute_frenet_frames(coords, mask)
+        return T(rots, coords)
+
     def forward_diffuse(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
         # No need to work with noise added
         x_t_plus_one, _ = self.model.q(x_t, t, mask)
+        return x_t_plus_one
+
+    def forward_diffuse_deterministic(
+        self, x_t: Frames, t: Tensor, mask: Tensor
+    ) -> Frames:
+        x_t_plus_one_trans = self.model.sqrt_alphas[t].view(-1, 1, 1) * (x_t.trans)
+        x_t_plus_one = self.coords_to_frames(x_t_plus_one_trans, mask)
         return x_t_plus_one
 
     def forward_log_likelihood(
@@ -76,7 +102,7 @@ class GenieAdapter(FrameDiffusionModel):
         for batch in torch.split(torch.arange(x_t.shape[0]), self.batch_size):
             curr_batch_size = len(batch)
             denoised_trans = self.model.model(
-                x_t.__class__(x_t.rots[batch], x_t.trans[batch]),
+                T(x_t.rots[batch], x_t.trans[batch]),
                 t[:curr_batch_size],
                 mask[:curr_batch_size],
             ).trans
@@ -92,16 +118,20 @@ class GenieAdapter(FrameDiffusionModel):
         mu = (1.0 / self.model.sqrt_alphas[t]).view(-1, 1, 1) * (
             x_t.trans - noise_scale * noise_pred_trans
         )
-        sigma = self.model.sqrt_betas[t].view(-1, 1, 1)
+        sigma = self.model.sqrt_betas[t]
 
         ## We can skip the normalising constant for most use-cases, e.g. for
         ## importance weights calculation, but keep it for completeness
         llik = (
-            -0.5 * ((x_t_minus_one.trans - mu)[:, llik_mask[0] == 1] / sigma) ** 2
+            -0.5
+            * ((x_t_minus_one.trans - mu)[:, llik_mask[0] == 1] / sigma.view(-1, 1, 1))
+            ** 2
         ).sum(axis=(1, 2)) - 0.5 * torch.log(2 * torch.pi * sigma * sigma)
 
         return llik.detach()
 
-    def to(self, *args: Any, **kwargs: Any) -> "GenieAdapter":
-        self.model.to(*args, **kwargs)
-        return self
+    def to(self, device: Union[str, torch.device]) -> "GenieAdapter":
+        self.model = self.model.to(device)
+        self.device = device
+        self._setup_on_device()
+        return super().to(device)
