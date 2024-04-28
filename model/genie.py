@@ -23,6 +23,8 @@ class GenieAdapter(FrameDiffusionModel):
     def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
         config = Config(f_config)
         model = Genie.load_from_checkpoint(f_weights, config=config)
+        model.eval()
+        model.model.eval()
         return GenieAdapter(model)
 
     def setup_schedule(self) -> None:
@@ -89,15 +91,7 @@ class GenieAdapter(FrameDiffusionModel):
     ) -> Frames:
         return self.model.p(x_t, t, mask, noise_scale)
 
-    def reverse_log_likelihood(
-        self,
-        x_t_minus_one: Frames,
-        x_t: Frames,
-        t: Tensor,
-        llik_mask: Tensor,
-        mask: Tensor,
-    ) -> Tensor:
-        # Find noise prediction
+    def _epsilon(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
         denoised_pile = []
         for batch in torch.split(torch.arange(x_t.shape[0]), self.batch_size):
             curr_batch_size = len(batch)
@@ -108,8 +102,19 @@ class GenieAdapter(FrameDiffusionModel):
             ).trans
             denoised_pile.append(denoised_trans)
 
+        return x_t.trans - torch.cat(denoised_pile, dim=0)
+
+    def reverse_log_likelihood(
+        self,
+        x_t_minus_one: Frames,
+        x_t: Frames,
+        t: Tensor,
+        llik_mask: Tensor,
+        mask: Tensor,
+    ) -> Tensor:
+        # Find noise prediction
         ## [B, N_AA, 3]
-        noise_pred_trans = x_t.trans - torch.cat(denoised_pile, dim=0)
+        noise_pred_trans = self._epsilon(x_t, t, mask)
 
         # Find probability density
         noise_scale = (
