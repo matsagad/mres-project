@@ -1,10 +1,8 @@
 from conditional.wrapper import ConditionalWrapper
-from model.diffusion import FrameDiffusionModel
 import logging
-import os
+from model.diffusion import FrameDiffusionModel
 import torch
 from torch import Tensor
-from utils.path import out_dir
 from utils.resampling import residual_resample
 from tqdm import tqdm
 from typing import Callable
@@ -134,17 +132,7 @@ class ReplacementMethod(ConditionalWrapper):
 
         # Save traces for debugging
         if self.particle_filter:
-            out = out_dir()
-            os.makedirs(os.path.join(out, "stats"))
-            for stat, values in pf_stats.items():
-                if not values:
-                    continue
-                tensor_values = (
-                    torch.stack(values)
-                    if type(values[0]) == torch.Tensor
-                    else torch.tensor(values)
-                )
-                torch.save(tensor_values, os.path.join(out, "stats", f"{stat}.pt"))
+            self.save_stats(pf_stats)
 
         logger.info("Done de-noising samples.")
 

@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
 from model.diffusion import FrameDiffusionModel
+import os
 from torch import Tensor
 import torch
 import tqdm
+from typing import Dict
+from utils.path import out_dir
 
 
 class ConditionalWrapper(ABC):
@@ -57,3 +60,16 @@ class ConditionalWrapper(ABC):
                 x_trajectory.append(x_t)
 
         return x_trajectory
+
+    def save_stats(self, stats: Dict[str, any]) -> None:
+        out = out_dir()
+        os.makedirs(os.path.join(out, "stats"), exist_ok=True)
+        for stat, values in stats.items():
+            if not values:
+                continue
+            tensor_values = (
+                torch.stack(values)
+                if type(values[0]) == torch.Tensor
+                else torch.tensor(values)
+            )
+            torch.save(tensor_values, os.path.join(out, "stats", f"{stat}.pt"))
