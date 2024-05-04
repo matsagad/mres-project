@@ -1,0 +1,4 @@
+
+name: "tds"
+n_particles: ${experiment.n_samples}
+resampling_method: "residual"
