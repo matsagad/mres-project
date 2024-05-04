@@ -2,15 +2,18 @@ from utils.path import add_submodules_to_path, out_dir
 
 add_submodules_to_path()
 
-from model.genie import GenieAdapter
 from conditional.replacement import ReplacementMethod
+from conditional.tds import TDS
 import hydra
 import logging
+from model.genie import GenieAdapter
 from omegaconf import DictConfig, OmegaConf
 import os
 import sys
 import time
 import torch
+import traceback
+from types import TracebackType
 from typing import Callable
 from utils.pdb import pdb_to_c_alpha_backbone, c_alpha_backbone_to_pdb
 from utils.resampling import RESAMPLING_METHOD
@@ -31,6 +34,16 @@ def experiment_job(fn: Callable) -> Callable:
         logger.info(f"Finished {experiment_name} experiment in {t_elapsed_str}.")
 
     return wrapper
+
+
+def get_resampling_method(method: str) -> Callable:
+    if method not in RESAMPLING_METHOD:
+        logger.error(
+            f'Invalid resampling method "{method}". '
+            f"Choose from: {', '.join(RESAMPLING_METHOD.keys())}."
+        )
+        sys.exit(1)
+    return RESAMPLING_METHOD[method]
 
 
 @experiment_job
@@ -61,20 +74,23 @@ def sample_conditional(cfg):
 
     setup = None
     if method == "replacement" or method == "smcdiff":
-        resampling_method = None
-        if method == "smcdiff":
-            if cond_cfg.resampling_method not in RESAMPLING_METHOD:
-                logger.error(
-                    f'Invalid resampling method "{cond_cfg.resampling_method}". '
-                    f"Choose from: {', '.join(RESAMPLING_METHOD.keys())}."
-                )
-                sys.exit(1)
-            resampling_method = RESAMPLING_METHOD[cond_cfg.resampling_method]
+        resampling_method = (
+            None
+            if method == "replacement"
+            else get_resampling_method(cond_cfg.resampling_method)
+        )
 
         setup = ReplacementMethod(model).with_config(
             noisy_motif=cond_cfg.noisy_motif,
             particle_filter=(method == "smcdiff"),
             replacement_weight=float(cond_cfg.replacement_weight),
+            resample_indices=resampling_method,
+        )
+
+    elif method == "tds":
+        resampling_method = get_resampling_method(cond_cfg.resampling_method)
+
+        setup = TDS(model).with_config(
             resample_indices=resampling_method,
         )
 
@@ -154,6 +170,15 @@ def main(cfg: DictConfig) -> None:
         sample_unconditional(cfg)
         return
 
+
+def log_exception(_type: type, value: BaseException, tb: TracebackType) -> None:
+    if issubclass(_type, KeyboardInterrupt):
+        sys.__excepthook__(_type, value, tb)
+        return
+    logger.exception("".join(traceback.format_exception(_type, value, tb)))
+
+
+sys.excepthook = log_exception
 
 if __name__ == "__main__":
     main()
