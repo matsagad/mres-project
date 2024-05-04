@@ -20,6 +20,11 @@ class GenieAdapter(FrameDiffusionModel):
 
         self.setup_schedule()
 
+        self.variance = self.model.betas
+        self.sqrt_variance = self.model.sqrt_betas
+        self.forward_variance = self.model.one_minus_alphas_cumprod
+        self.sqrt_forward_variance = self.model.sqrt_one_minus_alphas_cumprod
+
     def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
         config = Config(f_config)
         model = Genie.load_from_checkpoint(f_weights, config=config)
@@ -32,15 +37,25 @@ class GenieAdapter(FrameDiffusionModel):
         self.setup = True
 
     def _setup_on_device(self) -> None:
-        attrs = [
+        self_attrs = [
+            "variance",
+            "sqrt_variance",
+            "forward_variance",
+            "sqrt_forward_variance",
+        ]
+        for attr in self_attrs:
+            setattr(self, attr, getattr(self, attr).to(self.device))
+
+        model_attrs = [
             "alphas",
             "sqrt_alphas",
             "sqrt_alphas_cumprod",
+            "one_minus_alphas_cumprod",
             "sqrt_one_minus_alphas_cumprod",
             "betas",
             "sqrt_betas",
         ]
-        for attr in attrs:
+        for attr in model_attrs:
             setattr(self.model, attr, getattr(self.model, attr).to(self.device))
 
     def transform(self, batch: Tensor) -> Tensor:
@@ -80,11 +95,11 @@ class GenieAdapter(FrameDiffusionModel):
         mu = self.model.sqrt_alphas[t].view(-1, 1, 1) * (x_t.trans)
         sigma = self.model.sqrt_betas[t].view(-1, 1, 1)
 
-        llik = (
+        log_density = (
             -0.5 * ((x_t_plus_one.trans - mu)[:, llik_mask[0] == 1] / sigma) ** 2
         ).sum(axis=(1, 2)) - 0.5 * torch.log(2 * torch.pi * sigma * sigma)
 
-        return llik.detach()
+        return log_density
 
     def reverse_diffuse(
         self, x_t: Frames, t: Tensor, mask: Tensor, noise_scale: float
@@ -99,10 +114,20 @@ class GenieAdapter(FrameDiffusionModel):
                 T(x_t.rots[batch], x_t.trans[batch]),
                 t[:curr_batch_size],
                 mask[:curr_batch_size],
-            ).trans
+            ).trans.detach()
             denoised_pile.append(denoised_trans)
 
         return x_t.trans - torch.cat(denoised_pile, dim=0)
+
+    def predict_fully_denoised(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
+        epsilon = self._epsilon(x_t, t, mask)
+
+        x_0_trans = (
+            x_t.trans
+            - self.model.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1) * epsilon
+        ) / self.model.sqrt_alphas_cumprod[t].view(-1, 1, 1)
+
+        return self.coords_to_frames(x_0_trans, mask)
 
     def reverse_log_likelihood(
         self,
@@ -114,26 +139,30 @@ class GenieAdapter(FrameDiffusionModel):
     ) -> Tensor:
         # Find noise prediction
         ## [B, N_AA, 3]
-        noise_pred_trans = self._epsilon(x_t, t, mask)
+        epsilon = self._epsilon(x_t, t, mask)
 
         # Find probability density
         noise_scale = (
             self.model.betas[t] / self.model.sqrt_one_minus_alphas_cumprod[t]
         ).view(-1, 1, 1)
         mu = (1.0 / self.model.sqrt_alphas[t]).view(-1, 1, 1) * (
-            x_t.trans - noise_scale * noise_pred_trans
+            x_t.trans - noise_scale * epsilon
         )
-        sigma = self.model.sqrt_betas[t]
+        sigma_squared = self.model.betas[t]
 
         ## We can skip the normalising constant for most use-cases, e.g. for
         ## importance weights calculation, but keep it for completeness
-        llik = (
+        log_density = (
             -0.5
-            * ((x_t_minus_one.trans - mu)[:, llik_mask[0] == 1] / sigma.view(-1, 1, 1))
-            ** 2
-        ).sum(axis=(1, 2)) - 0.5 * torch.log(2 * torch.pi * sigma * sigma)
+            * ((x_t_minus_one.trans - mu)[:, llik_mask[0] == 1] ** 2)
+            / sigma_squared.view(-1, 1, 1)
+        ).sum(axis=(1, 2)) - 0.5 * torch.log(2 * torch.pi * sigma_squared)
 
-        return llik.detach()
+        return log_density
+
+    def score(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
+        epsilon = self._epsilon(x_t, t, mask)
+        return -epsilon / self.model.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
 
     def to(self, device: Union[str, torch.device]) -> "GenieAdapter":
         self.model = self.model.to(device)

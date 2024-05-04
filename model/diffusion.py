@@ -4,7 +4,8 @@ from pytorch_lightning.core import LightningModule
 from torch import Tensor
 
 
-# Interface adapted from genie/diffusion/diffusion.py
+# Interface mainly built on top of genie/diffusion/diffusion.py
+# Might be too restrictive towards DDPMs?
 class FrameDiffusionModel(LightningModule, ABC):
 
     @property
@@ -54,6 +55,38 @@ class FrameDiffusionModel(LightningModule, ABC):
     @setup.setter
     def setup(self, _setup: bool) -> None:
         self._setup = _setup
+
+    @property
+    def variance(self) -> Tensor:
+        return self._variance
+
+    @variance.setter
+    def variance(self, _variance: Tensor) -> None:
+        self._variance = _variance
+
+    @property
+    def sqrt_variance(self) -> Tensor:
+        return self._sqrt_variance
+
+    @sqrt_variance.setter
+    def sqrt_variance(self, _sqrt_variance: Tensor) -> None:
+        self._sqrt_variance = _sqrt_variance
+
+    @property
+    def forward_variance(self) -> Tensor:
+        return self._forward_variance
+
+    @forward_variance.setter
+    def forward_variance(self, _forward_variance: Tensor) -> None:
+        self._forward_variance = _forward_variance
+
+    @property
+    def sqrt_forward_variance(self) -> Tensor:
+        return self._sqrt_forward_variance
+
+    @sqrt_forward_variance.setter
+    def sqrt_forward_variance(self, _sqrt_forward_variance: Tensor) -> None:
+        self._sqrt_forward_variance = _sqrt_forward_variance
 
     @abstractmethod
     def setup_schedule(self) -> None:
@@ -111,6 +144,14 @@ class FrameDiffusionModel(LightningModule, ABC):
         llik_mask: Tensor,
         mask: Tensor,
     ) -> Tensor:
+        raise NotImplementedError
+
+    @abstractmethod
+    def predict_fully_denoised(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
+        raise NotImplementedError
+
+    @abstractmethod
+    def score(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
         raise NotImplementedError
 
     def with_batch_size(self, batch_size: int) -> "FrameDiffusionModel":
