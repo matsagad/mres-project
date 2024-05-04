@@ -88,6 +88,16 @@ def sample_conditional(cfg):
             os.path.join(out, "scaffolds", f"scaffold-{i}.pdb"),
         )
 
+    if cfg.experiment.keep_coords_trace:
+        os.makedirs(os.path.join(out, "traces"))
+        # [K, T, N_AA, 3]
+        samples_trans = torch.stack(
+            [sample.trans.detach().cpu() for sample in samples]
+        ).swapaxes(0, 1)
+
+        for i, sample_trace in enumerate(samples_trans):
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
+
 
 @experiment_job
 def sample_unconditional(cfg):
@@ -113,6 +123,16 @@ def sample_unconditional(cfg):
             sample.trans.detach().cpu(),
             os.path.join(out, "samples", f"sample-{i}.pdb"),
         )
+
+    if cfg.experiment.keep_coords_trace:
+        os.makedirs(os.path.join(out, "traces"))
+        # [K, T, N_AA, 3]
+        samples_trans = torch.stack(
+            [sample.trans.detach().cpu() for sample in samples]
+        ).swapaxes(0, 1)
+
+        for i, sample_trace in enumerate(samples_trans):
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config.yaml")
