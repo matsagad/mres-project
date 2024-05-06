@@ -8,7 +8,7 @@ def pdb_to_c_alpha_backbone(f_pdb: str) -> Tensor:
     LABELS = "xyz"
     ca_line = re.compile(
         r"^ATOM\s*[0-9]+\s*CA\s*[a-zA-Z\s]+\s*[0-9]+\s*"
-        + "\s+".join(f"(?P<{label}>[0-9\.]+)" for label in LABELS)
+        + "\s+".join(f"(?P<{label}>[0-9\.\-]+)" for label in LABELS)
     )
 
     backbone = []
