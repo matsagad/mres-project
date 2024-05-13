@@ -106,6 +106,16 @@ class GenieAdapter(FrameDiffusionModel):
     ) -> Frames:
         return self.model.p(x_t, t, mask, noise_scale)
 
+    def reverse_diffuse_deterministic(
+        self, x_t: Frames, t: Tensor, mask: Tensor
+    ) -> Frames:
+        x_t_minus_one_trans = (
+            x_t.trans + self.model.betas[t].view(-1, 1, 1) * self.score(x_t, t, mask)
+        ) / self.model.sqrt_alphas[t].view(-1, 1, 1)
+
+        x_t_minus_one = self.coords_to_frames(x_t_minus_one_trans, mask)
+        return x_t_minus_one
+
     def _epsilon(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
         denoised_pile = []
         for batch in torch.split(torch.arange(x_t.shape[0]), self.batch_size):

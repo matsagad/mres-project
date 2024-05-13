@@ -136,6 +136,12 @@ class FrameDiffusionModel(LightningModule, ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def reverse_diffuse_deterministic(
+        self, x_t: Frames, t: Tensor, mask: Tensor
+    ) -> Frames:
+        raise NotImplementedError
+
+    @abstractmethod
     def reverse_log_likelihood(
         self,
         x_t_minus_one: Frames,
