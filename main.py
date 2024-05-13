@@ -2,6 +2,7 @@ from utils.path import add_submodules_to_path, out_dir
 
 add_submodules_to_path()
 
+from conditional.fpssmc import FPSSMC
 from conditional.replacement import ReplacementMethod
 from conditional.tds import TDS
 import hydra
@@ -95,6 +96,14 @@ def sample_given_motif(cfg):
             resample_indices=resampling_method,
         )
 
+    elif method == "fpssmc":
+        setup = FPSSMC(model).with_config(
+            noisy_motif=cond_cfg.noisy_motif,
+            particle_filter=cond_cfg.particle_filter,
+            resample_indices=resampling_method,
+            sigma=float(cond_cfg.sigma),
+        )
+
     samples = setup.sample_given_motif(mask, motif, motif_mask)
 
     out = out_dir()
@@ -157,6 +166,55 @@ def sample_unconditional(cfg):
             torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
 
 
+@experiment_job
+def sample_given_symmetry(cfg):
+    device = torch.device(cfg.model.device)
+
+    model = (
+        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
+        .with_batch_size(cfg.model.batch_size)
+        .with_noise_scale(cfg.model.noise_scale)
+        .to(device)
+    )
+
+    mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
+    mask[:, : cfg.experiment.sample_length] = 1
+
+    cond_cfg = cfg.experiment.conditional_method
+    method = cond_cfg.name
+
+    setup = None
+    resampling_method = get_resampling_method(cond_cfg.resampling_method)
+
+    if method == "fpssmc":
+        setup = FPSSMC(model).with_config(
+            noisy_motif=cond_cfg.noisy_motif,
+            particle_filter=cond_cfg.particle_filter,
+            resample_indices=resampling_method,
+            sigma=float(cond_cfg.sigma),
+        )
+
+    samples = setup.sample_given_symmetry(mask, cfg.experiment.symmetry)
+
+    out = out_dir()
+    os.makedirs(os.path.join(out, "scaffolds"))
+    for i, sample in enumerate(samples[-1]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(out, "scaffolds", f"scaffold-{i}.pdb"),
+        )
+
+    if cfg.experiment.keep_coords_trace:
+        os.makedirs(os.path.join(out, "traces"))
+        # [K, T, N_AA, 3]
+        samples_trans = torch.stack(
+            [sample.trans[mask[0] == 1].detach().cpu() for sample in samples]
+        ).swapaxes(0, 1)
+
+        for i, sample_trace in enumerate(samples_trans):
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
+
+
 @hydra.main(version_base=None, config_path="config", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     OmegaConf.resolve(cfg)
@@ -174,6 +232,10 @@ def main(cfg: DictConfig) -> None:
 
     if experiment_name == "sample_given_motif":
         sample_given_motif(cfg)
+        return
+
+    if experiment_name == "sample_given_symmetry":
+        sample_given_symmetry(cfg)
         return
 
 
