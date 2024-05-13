@@ -15,7 +15,7 @@ import torch
 import traceback
 from types import TracebackType
 from typing import Callable
-from utils.pdb import pdb_to_c_alpha_backbone, c_alpha_backbone_to_pdb
+from utils.pdb import pdb_to_c_alpha_backbone, c_alpha_backbone_to_pdb, get_motif_mask
 from utils.resampling import RESAMPLING_METHOD
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,13 @@ def sample_conditional(cfg):
     # according to Genie's custom config file above. Although, another option
     # is to set them with values from cfg in case we use other models.
 
-    motif = pdb_to_c_alpha_backbone(cfg.experiment.motif).to(device)
-    motif_mask = torch.zeros((1, model.max_n_residues), device=device)
-    # Currently we assume motif is contiguous and placed at the start
-    motif_mask[:, : motif.shape[0]] = 1
+    _motif = pdb_to_c_alpha_backbone(cfg.experiment.motif).to(device)
+    motif, motif_mask = get_motif_mask(
+        _motif,
+        cfg.experiment.sample_length,
+        model.max_n_residues,
+        cfg.experiment.motif_contig_region,
+    )
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1

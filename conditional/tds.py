@@ -30,16 +30,10 @@ class TDS(ConditionalWrapper):
         """
 
         N_TIMESTEPS = self.model.n_timesteps
-        MAX_N_RESIDUES = self.model.max_n_residues
         K = mask.shape[0]
 
         # Set-up motif
-        MOTIF_SEGMENT = motif_mask[0] == 1
-        trans_motif = torch.zeros((1, MAX_N_RESIDUES, 3), device=self.device)
-        trans_motif[:, MOTIF_SEGMENT] = (
-            motif - torch.mean(motif, dim=0, keepdim=True)
-        ).float()
-        x_motif = self.model.coords_to_frames(trans_motif, motif_mask)
+        x_motif = self.model.coords_to_frames(motif, motif_mask)
 
         # Initialise weights
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()

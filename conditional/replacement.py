@@ -37,22 +37,17 @@ class ReplacementMethod(ConditionalWrapper):
     ) -> Tensor:
         """
         Replacement method as defined in the ProtDiff/SMCDiff
-        paper: https://arxiv.org/pdf/2206.04119.pdf
+        paper: https://arxiv.org/pdf/2206.04119.pdf (Trippe et al., 2023)
         """
 
         NOISE_SCALE = self.model.noise_scale
         N_TIMESTEPS = self.model.n_timesteps
-        MAX_N_RESIDUES = self.model.max_n_residues
         K = mask.shape[0]
 
         # (1) Forward diffuse motif
         MOTIF_SEGMENT = motif_mask[0] == 1
-        trans_motif = torch.zeros((1, MAX_N_RESIDUES, 3), device=self.device)
-        trans_motif[:, MOTIF_SEGMENT] = (
-            motif - torch.mean(motif, dim=0, keepdim=True)
-        ).float()
+        x_motif = self.model.coords_to_frames(motif, motif_mask)
 
-        x_motif = self.model.coords_to_frames(trans_motif, motif_mask)
         motif_trajectory = [x_motif]
         forward_diffuse = (
             self.model.forward_diffuse
