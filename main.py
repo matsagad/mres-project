@@ -47,7 +47,7 @@ def get_resampling_method(method: str) -> Callable:
 
 
 @experiment_job
-def sample_conditional(cfg):
+def sample_given_motif(cfg):
     device = torch.device(cfg.model.device)
 
     model = (
@@ -76,13 +76,13 @@ def sample_conditional(cfg):
     method = cond_cfg.name
 
     setup = None
-    if method == "replacement" or method == "smcdiff":
-        resampling_method = (
-            None
-            if method == "replacement"
-            else get_resampling_method(cond_cfg.resampling_method)
-        )
+    resampling_method = (
+        None
+        if method == "replacement"
+        else get_resampling_method(cond_cfg.resampling_method)
+    )
 
+    if method == "replacement" or method == "smcdiff":
         setup = ReplacementMethod(model).with_config(
             noisy_motif=cond_cfg.noisy_motif,
             particle_filter=(method == "smcdiff"),
@@ -91,8 +91,6 @@ def sample_conditional(cfg):
         )
 
     elif method == "tds":
-        resampling_method = get_resampling_method(cond_cfg.resampling_method)
-
         setup = TDS(model).with_config(
             resample_indices=resampling_method,
         )
@@ -103,15 +101,20 @@ def sample_conditional(cfg):
     os.makedirs(os.path.join(out, "scaffolds"))
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
-            sample.trans.detach().cpu(),
+            sample.trans[mask[0] == 1].detach().cpu(),
             os.path.join(out, "scaffolds", f"scaffold-{i}.pdb"),
         )
+
+    c_alpha_backbone_to_pdb(
+        motif[0][motif_mask[0] == 1],
+        os.path.join(out, f"motif.pdb"),
+    )
 
     if cfg.experiment.keep_coords_trace:
         os.makedirs(os.path.join(out, "traces"))
         # [K, T, N_AA, 3]
         samples_trans = torch.stack(
-            [sample.trans.detach().cpu() for sample in samples]
+            [sample.trans[mask[0] == 1].detach().cpu() for sample in samples]
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
@@ -165,12 +168,12 @@ def main(cfg: DictConfig) -> None:
         print("Run with the --help flag to see options for experiments.")
         return
 
-    if experiment_name == "sample_conditional":
-        sample_conditional(cfg)
-        return
-
     if experiment_name == "sample_unconditional":
         sample_unconditional(cfg)
+        return
+
+    if experiment_name == "sample_given_motif":
+        sample_given_motif(cfg)
         return
 
 
