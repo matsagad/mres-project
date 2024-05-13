@@ -113,8 +113,6 @@ class FPSSMC(ConditionalWrapper):
         A: Tensor,
         recenter_protein: bool = False,
     ) -> Tensor:
-        print(A.shape)
-        print(A)
         """
         Filtering Posterior Sampling with Sequential Monte Carlo as
         defined in the FPS paper: https://openreview.net/pdf?id=tplXNcHZs1
