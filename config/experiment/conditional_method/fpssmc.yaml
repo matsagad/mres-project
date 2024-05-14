@@ -1,0 +1,7 @@
+
+name: "fpssmc"
+noisy_motif: False
+sigma: 0.05
+particle_filter: True
+n_particles: ${experiment.n_samples}
+resampling_method: "residual"
