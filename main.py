@@ -126,14 +126,9 @@ def sample_given_motif(cfg: DictConfig) -> None:
             os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
         )
 
-    # c_alpha_backbone_to_pdb(
-    #     motif[0][motif_mask[0] == 1],
-    #     os.path.join(out, f"motif.pdb"),
-    # )
-    n_motif_residues = (motif_mask == 1).sum().item()
     atom_backbone_to_pdb(
         {
-            atom: backbone[:, :n_motif_residues]
+            atom: backbone[:, (motif_mask[0] == 1).cpu()]
             for atom, backbone in masked_backbones.items()
         },
         os.path.join(out, "motif.pdb"),
