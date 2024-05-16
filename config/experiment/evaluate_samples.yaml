@@ -1,0 +1,6 @@
+
+name: "evaluate_samples"
+path_to_experiment: ???
+path_to_samples: "${experiment.path_to_experiment}/scaffolds"
+path_to_motif: "${experiment.path_to_experiment}/motif.pdb"
+path_to_motif_cfg: "${experiment.path_to_experiment}/motif_cfg.yaml"

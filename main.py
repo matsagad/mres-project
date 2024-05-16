@@ -8,15 +8,24 @@ from conditional.tds import TDS
 import hydra
 import logging
 from model.genie import GenieAdapter
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
+import omegaconf
 import os
+import subprocess
 import sys
 import time
 import torch
 import traceback
 from types import TracebackType
 from typing import Callable
-from utils.pdb import pdb_to_c_alpha_backbone, c_alpha_backbone_to_pdb, get_motif_mask
+from utils.pdb import (
+    pdb_to_atom_backbone,
+    pdb_to_c_alpha_backbone,
+    atom_backbone_to_pdb,
+    c_alpha_backbone_to_pdb,
+    get_motif_mask,
+)
 from utils.resampling import RESAMPLING_METHOD
 
 logger = logging.getLogger(__name__)
@@ -48,7 +57,7 @@ def get_resampling_method(method: str) -> Callable:
 
 
 @experiment_job
-def sample_given_motif(cfg):
+def sample_given_motif(cfg: DictConfig) -> None:
     device = torch.device(cfg.model.device)
 
     model = (
@@ -62,13 +71,16 @@ def sample_given_motif(cfg):
     # according to Genie's custom config file above. Although, another option
     # is to set them with values from cfg in case we use other models.
 
-    _motif = pdb_to_c_alpha_backbone(cfg.experiment.motif).to(device)
-    motif, motif_mask = get_motif_mask(
-        _motif,
+    motif_backbones = pdb_to_atom_backbone(cfg.experiment.motif)
+    masked_backbones, motif_mask = get_motif_mask(
+        motif_backbones,
         cfg.experiment.sample_length,
         model.max_n_residues,
         cfg.experiment.motif_contig_region,
+        mask_backbones=True,
     )
+    motif = masked_backbones["CA"].to(device)
+    motif_mask = motif_mask.to(device)
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
@@ -111,13 +123,28 @@ def sample_given_motif(cfg):
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds", f"scaffold-{i}.pdb"),
+            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
         )
 
-    c_alpha_backbone_to_pdb(
-        motif[0][motif_mask[0] == 1],
-        os.path.join(out, f"motif.pdb"),
+    # c_alpha_backbone_to_pdb(
+    #     motif[0][motif_mask[0] == 1],
+    #     os.path.join(out, f"motif.pdb"),
+    # )
+    n_motif_residues = (motif_mask == 1).sum().item()
+    atom_backbone_to_pdb(
+        {
+            atom: backbone[:, :n_motif_residues]
+            for atom, backbone in masked_backbones.items()
+        },
+        os.path.join(out, "motif.pdb"),
     )
+
+    motif_cfg = {
+        "sample_length": cfg.experiment.sample_length,
+        "motif_contig_region": cfg.experiment.motif_contig_region,
+    }
+    with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
+        f.write("\n".join(f"{k}: {v}" for k, v in motif_cfg.items()))
 
     if cfg.experiment.keep_coords_trace:
         os.makedirs(os.path.join(out, "traces"))
@@ -127,11 +154,11 @@ def sample_given_motif(cfg):
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
 
 
 @experiment_job
-def sample_unconditional(cfg):
+def sample_unconditional(cfg: DictConfig) -> None:
     device = torch.device(cfg.model.device)
 
     model = (
@@ -152,7 +179,7 @@ def sample_unconditional(cfg):
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans.detach().cpu(),
-            os.path.join(out, "samples", f"sample-{i}.pdb"),
+            os.path.join(out, "samples", f"sample_{i}.pdb"),
         )
 
     if cfg.experiment.keep_coords_trace:
@@ -163,11 +190,11 @@ def sample_unconditional(cfg):
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
 
 
 @experiment_job
-def sample_given_symmetry(cfg):
+def sample_given_symmetry(cfg: DictConfig) -> None:
     device = torch.device(cfg.model.device)
 
     model = (
@@ -201,7 +228,7 @@ def sample_given_symmetry(cfg):
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds", f"scaffold-{i}.pdb"),
+            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
         )
 
     if cfg.experiment.keep_coords_trace:
@@ -212,7 +239,75 @@ def sample_given_symmetry(cfg):
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace-{i}.pt"))
+            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
+
+
+@experiment_job
+def evaluate_samples(cfg: DictConfig) -> None:
+    path_to_samples = cfg.experiment.path_to_samples
+    path_to_motif = cfg.experiment.path_to_motif
+    path_to_motif_cfg = cfg.experiment.path_to_motif_cfg
+
+    out = out_dir()
+    n_samples = 0
+
+    # Populate coords folder with CA atom coordinates of each sample
+    path_to_coords = os.path.join(out, "coords")
+    os.makedirs(path_to_coords)
+    with os.scandir(path_to_samples) as files:
+        for file in files:
+            if file.is_file() and file.name.endswith(".pdb"):
+                n_samples += 1
+                c_alpha_coords = pdb_to_c_alpha_backbone(
+                    os.path.join(path_to_samples, file.name)
+                ).numpy()
+                out_name = f"{file.name.split('.')[0]}.npy"
+                np.savetxt(
+                    os.path.join(out, "coords", out_name), c_alpha_coords, delimiter=","
+                )
+
+    # Load motif config file
+    motif_cfg = omegaconf.OmegaConf.load(path_to_motif_cfg)
+    motif_backbones = pdb_to_atom_backbone(path_to_motif)
+    motif_mask = get_motif_mask(
+        motif_backbones,
+        motif_cfg.sample_length,
+        motif_cfg.sample_length,
+        motif_cfg.motif_contig_region,
+        mask_backbones=False,
+    )
+
+    # Populate motif_masks folder with bitmasks for each sample
+    path_to_masks = os.path.join(out, "motif_masks")
+    os.makedirs(path_to_masks)
+    for i in range(n_samples):
+        np.savetxt(
+            os.path.join(path_to_masks, f"scaffold_{i}.npy"),
+            motif_mask[0].numpy(),
+        )
+
+    eval_out = os.path.join(out, "evaluation")
+    eval_cmd_args = [
+        "python3",
+        "evaluations/pipeline/evaluate.py",
+        f"--input_dir={out}",  # Must contain "coords" and "motif_masks" subfolders
+        f"--output_dir={eval_out}",
+    ]
+    if path_to_motif:
+        eval_cmd_args.append(f"--motif_filepath={path_to_motif}")
+    if not os.path.isdir("submodules/genie/packages"):
+        raise Exception(
+            "Genie packages folder missing: have you run `submodules/genie/scripts/setup_evaluation_pipeline.sh`?"
+        )
+    eval = subprocess.Popen(
+        eval_cmd_args,
+        cwd=os.path.join(os.getcwd(), "submodules/genie"),
+    )
+    eval.wait()
+
+
+def placeholder_job(*args) -> None:
+    print("Run with the --help flag to see options for experiments.")
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config.yaml")
@@ -222,21 +317,15 @@ def main(cfg: DictConfig) -> None:
     experiment_name = cfg.experiment["name"]
     NO_EXPERIMENT_SET = "none"
 
-    if experiment_name == NO_EXPERIMENT_SET:
-        print("Run with the --help flag to see options for experiments.")
-        return
+    experiment_jobs = {
+        NO_EXPERIMENT_SET: placeholder_job,
+        "sample_unconditional": sample_unconditional,
+        "sample_given_motif": sample_given_motif,
+        "sample_given_symmetry": sample_given_symmetry,
+        "evaluate_samples": evaluate_samples,
+    }
 
-    if experiment_name == "sample_unconditional":
-        sample_unconditional(cfg)
-        return
-
-    if experiment_name == "sample_given_motif":
-        sample_given_motif(cfg)
-        return
-
-    if experiment_name == "sample_given_symmetry":
-        sample_given_symmetry(cfg)
-        return
+    experiment_jobs.get(experiment_name, placeholder_job)(cfg)
 
 
 def log_exception(_type: type, value: BaseException, tb: TracebackType) -> None:
