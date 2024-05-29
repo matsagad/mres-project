@@ -63,6 +63,10 @@ class ReplacementMethod(ConditionalWrapper):
         ):
             t = torch.tensor([i] * motif_mask.shape[0], device=self.device).long()
             x_motif = forward_diffuse(x_motif, t, motif_mask)
+            # Keep motif zero-centred
+            x_motif.trans[:, motif_mask[0] == 1] -= torch.mean(
+                x_motif.trans[:, motif_mask[0] == 1], dim=1, keepdim=True
+            )
             motif_trajectory.append(x_motif)
 
         logger.info("Collected noised motifs at all time steps.")
@@ -84,6 +88,11 @@ class ReplacementMethod(ConditionalWrapper):
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
             ):
+                # Keep motif segment of protein zero-centred
+                x_t.trans[:, mask[0] == 1] -= torch.mean(
+                    x_t.trans[:, MOTIF_SEGMENT], dim=1
+                ).unsqueeze(1)
+                
                 # Replace motif
                 ## Index by i + 1 since ts_motifs[(T - 1) + 1] is x_{M}^{T}
                 x_t.trans[:, MOTIF_SEGMENT] = (1 - _gamma) * x_t.trans[
