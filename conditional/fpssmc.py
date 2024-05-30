@@ -16,12 +16,12 @@ class FPSSMC(ConditionalWrapper):
 
     def with_config(
         self,
-        noisy_motif: bool = False,
+        noisy_y: bool = False,
         particle_filter: bool = True,
         resample_indices: Callable = residual_resample,
         sigma: float = 0.05,
     ) -> "FPSSMC":
-        self.noisy_motif = noisy_motif
+        self.noisy_y = noisy_y
         self.particle_filter = particle_filter
         self.resample_indices = resample_indices
         self.sigma = sigma
@@ -111,51 +111,81 @@ class FPSSMC(ConditionalWrapper):
         y: Frames,
         y_mask: Tensor,
         A: Tensor,
-        recenter_protein: bool = False,
+        recenter_x: bool = True,
     ) -> Tensor:
         """
         Filtering Posterior Sampling with Sequential Monte Carlo as
         defined in the FPS paper: https://openreview.net/pdf?id=tplXNcHZs1
-        (Dou & Song, 2024) but adapted for motif-scaffolding.
+        (Dou & Song, 2024)
         """
         N_TIMESTEPS = self.model.n_timesteps
         N_COORDS_PER_RESIDUE = 3
         K, MAX_N_RESIDUES = mask.shape
         sigma = self.sigma
 
+        OBSERVED_REGION = y_mask[0] == 1
         N_RESIDUES = (mask[0] == 1).sum().item()
-        N_OBSERVED = (y_mask[0] == 1).sum().item()
+        N_OBSERVED = (OBSERVED_REGION).sum().item()
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
         d = N_OBSERVED * N_COORDS_PER_RESIDUE
         assert d == A.shape[0] and D == A.shape[1]
 
         # (1) Generate sequence \{y^{t}\}^{T}_{t=0}
-        y_frame = self.model.coords_to_frames(
-            y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask
-        )
-        y_sequence = [y_frame]
+        y_0 = self.model.coords_to_frames(y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask)
 
-        forward_diffuse = (
-            self.model.forward_diffuse
-            if self.noisy_motif
-            else self.model.forward_diffuse_deterministic
-        )
+        epsilon_T = self.model.sample_frames(mask[:1])
+        y_T_trans = torch.zeros(y_0.trans.shape, device=self.device)
+        y_T_trans[:, OBSERVED_REGION] = (
+            epsilon_T.trans[:, :N_RESIDUES].view(D) @ A.T
+        ).view(1, -1, N_COORDS_PER_RESIDUE)
+        y_T = self.model.coords_to_frames(y_T_trans, y_mask)
+
+        y_t = y_T
+        y_sequence = [y_T]
 
         w = torch.ones(K, device=self.device) / K
         pf_stats = {"ess": [], "w": []}
 
         for i in tqdm(
-            reversed(range(N_TIMESTEPS)),
+            reversed(range(1, N_TIMESTEPS)),
             desc="Generating {y_t}",
             total=N_TIMESTEPS,
             disable=not self.verbose,
         ):
-            t = torch.tensor([i] * y_frame.shape[0], device=self.device).long()
-            y_frame = forward_diffuse(y_frame, t, y_mask)
-            y_sequence.append(y_frame)
+            t = torch.tensor([i] * y_t.shape[0], device=self.device).long()
+
+            alpha_bar_t = 1 - self.model.forward_variance[t]
+            alpha_bar_t_minus_one = 1 - self.model.forward_variance[t - 1]
+
+            c = self.model.variance[t] / (1 - alpha_bar_t)
+            p_t = torch.sqrt((1 - c) * (1 - alpha_bar_t_minus_one) / (1 - alpha_bar_t))
+            q_t = torch.sqrt(c * (1 - alpha_bar_t_minus_one))
+
+            y_t_minus_one_trans = torch.zeros(y_0.trans.shape, device=self.device)
+            y_t_minus_one_trans[:, OBSERVED_REGION] = torch.sqrt(
+                alpha_bar_t_minus_one
+            ) * y_0.trans[:, OBSERVED_REGION] + p_t * (
+                y_t.trans[:, OBSERVED_REGION]
+                - torch.sqrt(alpha_bar_t) * y_0.trans[:, OBSERVED_REGION]
+            )
+
+            if self.noisy_y:
+                y_t_minus_one_trans[:, OBSERVED_REGION] += q_t * (
+                    A @ torch.randn((D,), device=self.device)
+                ).view(-1, N_COORDS_PER_RESIDUE)
+            y_t_minus_one_trans[:, OBSERVED_REGION] -= torch.mean(
+                y_t_minus_one_trans[:, OBSERVED_REGION], dim=1, keepdim=True
+            )
+            y_t_minus_one = self.model.coords_to_frames(y_t_minus_one_trans, y_mask)
+
+            y_t = y_t_minus_one
+            y_sequence.append(y_t)
+
+        y_sequence.append(y_0)
+        y_sequence = y_sequence[::-1]
 
         # (2) Generate backward sequence \{x^{t}\}^{T}_{t=0}
-        x_T = self.model.sample_frames(mask)
+        x_T = self.model.coords_to_frames(torch.tile(epsilon_T.trans, (K, 1, 1)), mask)
         x_sequence = [x_T]
         x_t = x_T
 
@@ -174,7 +204,7 @@ class FPSSMC(ConditionalWrapper):
                 / self.model.forward_variance[t[:1]]
             )
             mean = self.model.reverse_diffuse_deterministic(x_t, t, mask)
-            if recenter_protein:
+            if recenter_x:
                 # Translate mean so that motif segment is centred at zero
                 mean.trans[:, :N_RESIDUES] -= torch.mean(
                     mean.trans[:, y_mask[0] == 1], dim=1
@@ -201,6 +231,11 @@ class FPSSMC(ConditionalWrapper):
                 K, N_RESIDUES, N_COORDS_PER_RESIDUE
             )
             x_bar_t = self.model.coords_to_frames(x_bar_t_trans, mask)
+            if recenter_x:
+                # Translate mean so that motif segment is centred at zero
+                x_bar_t.trans[:, :N_RESIDUES] -= torch.mean(
+                    x_bar_t.trans[:, y_mask[0] == 1], dim=1
+                ).unsqueeze(1)
 
             if not self.particle_filter:
                 x_t = x_bar_t
