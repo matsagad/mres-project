@@ -27,29 +27,30 @@ class FPSSMC(ConditionalWrapper):
         self.sigma = sigma
         return self
 
-    def _3d_rot_matrices(self, theta: float) -> Tensor:
-        rot_x = torch.tensor(
-            [
-                [1, 0, 0],
-                [0, torch.cos(theta), -torch.sin(theta)],
-                [0, torch.sin(theta), torch.cos(theta)],
-            ]
-        ).to(self.device)
-        rot_y = torch.tensor(
-            [
-                [torch.cos(theta), 0, torch.sin(theta)],
-                [0, 1, 0],
-                [-torch.sin(theta), 0, torch.cos(theta)],
-            ]
-        ).to(self.device)
-        rot_z = torch.tensor(
-            [
-                [torch.cos(theta), -torch.sin(theta), 0],
-                [torch.sin(theta), torch.cos(theta), 0],
-                [0, 0, 1],
-            ]
-        ).to(self.device)
-        return rot_x, rot_y, rot_z
+    def _3d_rot_matrices(self, thetas: Tensor) -> Tensor:
+        assert len(thetas) == 1
+
+        _cos = torch.cos(thetas)
+        _sin = torch.sin(thetas)
+        zero = torch.zeros(len(thetas))
+        one = torch.ones(len(thetas))
+
+        R_x = torch.empty((len(thetas), 3, 3))
+        R_x[:, 0] = torch.stack([one, zero, zero]).T
+        R_x[:, 1] = torch.stack([zero, _cos, -_sin]).T
+        R_x[:, 2] = torch.stack([zero, _sin, _cos]).T
+
+        R_y = torch.empty((len(thetas), 3, 3))
+        R_y[:, 0] = torch.stack([_cos, zero, _sin]).T
+        R_y[:, 1] = torch.stack([zero, one, zero]).T
+        R_y[:, 2] = torch.stack([-_sin, zero, _cos]).T
+
+        R_z = torch.empty((len(thetas), 3, 3))
+        R_z[:, 0] = torch.stack([_cos, -_sin, zero]).T
+        R_z[:, 1] = torch.stack([_sin, _cos, zero]).T
+        R_z[:, 2] = torch.stack([zero, zero, one]).T
+
+        return R_x, R_y, R_z
 
     def sample_given_motif(
         self, mask: Tensor, motif: Tensor, motif_mask: Tensor
@@ -70,40 +71,69 @@ class FPSSMC(ConditionalWrapper):
         A[range(d), motif_indices_flat] = 1
 
         return self.sample_conditional(
-            mask, motif, motif_mask, A, recenter_protein=True
+            mask, motif, motif_mask, A, recenter_x=True
         )
 
     def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
         N_RESIDUES = (mask[0] == 1).sum().item()
         N_COORDS_PER_RESIDUE = 3
 
+        d = None
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
         SYM_GROUP_DELIM = "-"
+        symmetry_group = symmetry.split(SYM_GROUP_DELIM)[0]
 
-        if symmetry[0] == "S":
+        if symmetry_group == "S":
             # Cyclic symmetry S-n
             N_SYMMETRIES = int(symmetry.split(SYM_GROUP_DELIM)[-1])
-            N_FIXED_RESIDUES = (N_RESIDUES // N_SYMMETRIES) * N_SYMMETRIES
+            N_RESIDUES_PER_DOMAIN = N_RESIDUES // N_SYMMETRIES
+            N_FIXED_RESIDUES = N_RESIDUES_PER_DOMAIN * N_SYMMETRIES
 
             d = N_FIXED_RESIDUES * N_COORDS_PER_RESIDUE
 
-            theta = torch.tensor(2 * torch.pi / N_SYMMETRIES)
-            rot_x, *_ = self._3d_rot_matrices(theta)
+            thetas = 2 * torch.pi * torch.arange(N_SYMMETRIES).float() / N_SYMMETRIES
+            _, _, R_z = self._3d_rot_matrices(thetas)
+            F = R_z
 
-            A = torch.zeros((d, D), device=self.device)
-            NCPR = N_COORDS_PER_RESIDUE
-            for i in range(N_FIXED_RESIDUES):
-                A[NCPR * i : NCPR * (i + 1), NCPR * i : NCPR * (i + 1)] = rot_x
-            A[
-                range(d),
-                torch.arange(d).roll(-d // N_SYMMETRIES),
-            ] -= 1
-            y_mask = torch.zeros((1, N_RESIDUES), device=self.device)
-            y_mask[:, :N_FIXED_RESIDUES] = 1
-            y = torch.zeros((1, N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
-            return self.sample_conditional(mask, y, y_mask, A)
+        elif symmetry_group == "D":
+            # Dihedral symmetry D-n
+            N_SYMMETRIES = 2 * int(symmetry.split(SYM_GROUP_DELIM)[-1])
+            N_RESIDUES_PER_DOMAIN = N_RESIDUES // N_SYMMETRIES
+            N_FIXED_RESIDUES = N_RESIDUES_PER_DOMAIN * N_SYMMETRIES
 
-        raise NotImplementedError()
+            d = N_FIXED_RESIDUES * N_COORDS_PER_RESIDUE
+
+            thetas = (
+                2
+                * torch.pi
+                * torch.arange(N_SYMMETRIES // 2).float()
+                / (N_SYMMETRIES // 2)
+            )
+            _, R_y_pi, _ = self._3d_rot_matrices(torch.tensor([torch.pi]))
+            _, _, R_z = self._3d_rot_matrices(thetas)
+            S = torch.einsum("sij,tjk->tik", R_y_pi, R_z)
+            F = torch.concatenate((R_z, S))
+
+        assert d is not None, f"Unsupported symmetry group chosen: {symmetry_group}"
+
+        F = F.to(self.device)
+        A = torch.zeros((d, D), device=self.device)
+        NCPR = N_COORDS_PER_RESIDUE
+        for k, F_k in enumerate(F):
+            offset = NCPR * N_RESIDUES_PER_DOMAIN * k
+            for i in range(N_RESIDUES_PER_DOMAIN):
+                A[
+                    offset + NCPR * i : offset + NCPR * (i + 1),
+                    NCPR * i : NCPR * (i + 1),
+                ] = F_k
+
+        assert d <= D
+        A[range(d), range(d)] -= 1
+
+        y_mask = torch.zeros((1, N_RESIDUES), device=self.device)
+        y_mask[:, :N_FIXED_RESIDUES] = 1
+        y = torch.zeros((1, N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
+        return self.sample_conditional(mask, y, y_mask, A, recenter_x=True)
 
     def sample_conditional(
         self,
