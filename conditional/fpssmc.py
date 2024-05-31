@@ -177,7 +177,7 @@ class FPSSMC(ConditionalWrapper):
         pf_stats = {"ess": [], "w": []}
 
         for i in tqdm(
-            reversed(range(1, N_TIMESTEPS)),
+            reversed(range(N_TIMESTEPS)),
             desc="Generating {y_t}",
             total=N_TIMESTEPS,
             disable=not self.verbose,
@@ -220,19 +220,15 @@ class FPSSMC(ConditionalWrapper):
         x_t = x_T
 
         for i in tqdm(
-            reversed(range(N_TIMESTEPS - 1)),
+            reversed(range(N_TIMESTEPS)),
             desc="Generating {x_t}",
             total=N_TIMESTEPS,
             disable=not self.verbose,
         ):
-            t = torch.tensor([i + 1] * K, device=self.device).long()
+            t = torch.tensor([i] * K, device=self.device).long()
 
             covariance_inverse = torch.zeros((D, D), device=self.device)
-            covariance_inverse[range(D), range(D)] = 1 / (
-                self.model.variance[t[:1]]
-                * self.model.forward_variance[t[:1] - 1]
-                / self.model.forward_variance[t[:1]]
-            )
+            covariance_inverse[range(D), range(D)] = 1 / self.model.variance[t[:1]]
             mean = self.model.reverse_diffuse_deterministic(x_t, t, mask)
             if recenter_x:
                 # Translate mean so that motif segment is centred at zero
@@ -241,14 +237,14 @@ class FPSSMC(ConditionalWrapper):
                 ).unsqueeze(1)
 
             covariance_fps_inverse = covariance_inverse + (A.T @ A) / (
-                sigma**2 * self.model.forward_variance[t[:1] - 1]
+                sigma**2 * self.model.forward_variance[t[:1]]
             )
             covariance_fps = torch.inverse(covariance_fps_inverse)
 
             mean_fps = (
                 mean.trans[:, :N_RESIDUES].view(-1, D) @ covariance_inverse.T
-                + (A.T @ y_sequence[t[:1] - 1].trans[:, y_mask[0] == 1].view(d))
-                / (sigma**2 * self.model.forward_variance[t[:1] - 1])
+                + (A.T @ y_sequence[t[:1]].trans[:, y_mask[0] == 1].view(d))
+                / (sigma**2 * self.model.forward_variance[t[:1]])
             ) @ covariance_fps.T
 
             mvn = torch.distributions.MultivariateNormal(mean_fps, covariance_fps)
