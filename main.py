@@ -280,6 +280,9 @@ def evaluate_samples(cfg: DictConfig) -> None:
             os.path.join(path_to_masks, f"scaffold_{i}.npy"),
             motif_mask[0].numpy(),
         )
+    np.savetxt(
+        os.path.join(path_to_masks, "motif.npy"), motif_backbones["CA"], delimiter=","
+    )
 
     eval_out = os.path.join(out, "evaluation")
     eval_cmd_args = [
