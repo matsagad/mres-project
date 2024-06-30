@@ -32,29 +32,6 @@ class FPSSMC(ConditionalWrapper):
         self.fixed_motif = fixed_motif
         return self
 
-    def _3d_rot_matrices(self, thetas: Tensor) -> Tensor:
-        _cos = torch.cos(thetas)
-        _sin = torch.sin(thetas)
-        zero = torch.zeros(len(thetas))
-        one = torch.ones(len(thetas))
-
-        R_x = torch.empty((len(thetas), 3, 3))
-        R_x[:, 0] = torch.stack([one, zero, zero]).T
-        R_x[:, 1] = torch.stack([zero, _cos, -_sin]).T
-        R_x[:, 2] = torch.stack([zero, _sin, _cos]).T
-
-        R_y = torch.empty((len(thetas), 3, 3))
-        R_y[:, 0] = torch.stack([_cos, zero, _sin]).T
-        R_y[:, 1] = torch.stack([zero, one, zero]).T
-        R_y[:, 2] = torch.stack([-_sin, zero, _cos]).T
-
-        R_z = torch.empty((len(thetas), 3, 3))
-        R_z[:, 0] = torch.stack([_cos, -_sin, zero]).T
-        R_z[:, 1] = torch.stack([_sin, _cos, zero]).T
-        R_z[:, 2] = torch.stack([zero, zero, one]).T
-
-        return R_x, R_y, R_z
-
     def _general_3d_rot_matrix(self, thetas: Tensor, axis: Tensor) -> Tensor:
         assert len(axis) == 3
         u = axis / (axis**2).sum()
@@ -113,6 +90,7 @@ class FPSSMC(ConditionalWrapper):
     def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
         N_RESIDUES = (mask[0] == 1).sum().item()
         N_COORDS_PER_RESIDUE = 3
+        x_axis, y_axis, z_axis = torch.eye(3)
 
         d = None
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
@@ -128,7 +106,7 @@ class FPSSMC(ConditionalWrapper):
             d = N_FIXED_RESIDUES * N_COORDS_PER_RESIDUE
 
             thetas = 2 * torch.pi * torch.arange(N_SYMMETRIES).float() / N_SYMMETRIES
-            _, _, R_z = self._3d_rot_matrices(thetas)
+            R_z = self._general_3d_rot_matrix(thetas, z_axis)
             F = R_z
 
         elif symmetry_group == "D":
@@ -145,9 +123,9 @@ class FPSSMC(ConditionalWrapper):
                 * torch.arange(N_SYMMETRIES // 2).float()
                 / (N_SYMMETRIES // 2)
             )
-            _, R_y_pi, _ = self._3d_rot_matrices(torch.tensor([torch.pi]))
-            _, _, R_z = self._3d_rot_matrices(thetas)
-            S = torch.einsum("sij,tjk->tik", R_y_pi, R_z)
+            R_x_pi = self._general_3d_rot_matrix(torch.tensor([torch.pi]), x_axis)
+            R_z = self._general_3d_rot_matrix(thetas, z_axis)
+            S = torch.einsum("sij,tjk->tik", R_x_pi, R_z)
             F = torch.concatenate((R_z, S))
 
         assert d is not None, f"Unsupported symmetry group chosen: {symmetry_group}"
