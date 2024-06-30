@@ -25,6 +25,9 @@ class GenieAdapter(FrameDiffusionModel):
         self.forward_variance = self.model.one_minus_alphas_cumprod
         self.sqrt_forward_variance = self.model.sqrt_one_minus_alphas_cumprod
 
+        self._cached_epsilon = None
+        self._cached_score = None
+
     def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
         config = Config(f_config)
         model = Genie.load_from_checkpoint(f_weights, config=config)
@@ -102,9 +105,19 @@ class GenieAdapter(FrameDiffusionModel):
         return log_density
 
     def reverse_diffuse(
-        self, x_t: Frames, t: Tensor, mask: Tensor, noise_scale: float
+        self, x_t: Frames, t: Tensor, mask: Tensor, noise_scale: float = 1.0
     ) -> Frames:
-        return self.model.p(x_t, t, mask, noise_scale)
+        x_t_minus_one_trans = (
+            x_t.trans + self.model.betas[t].view(-1, 1, 1) * self.score(x_t, t, mask)
+        ) / self.model.sqrt_alphas[t].view(-1, 1, 1)
+
+        x_t_minus_one_trans += (
+            noise_scale
+            * self.model.sqrt_betas[t].view(-1, 1, 1)
+            * torch.randn(x_t_minus_one_trans.shape, device=self.device)
+        )
+        x_t_minus_one = self.coords_to_frames(x_t_minus_one_trans, mask)
+        return x_t_minus_one
 
     def reverse_diffuse_deterministic(
         self, x_t: Frames, t: Tensor, mask: Tensor
@@ -117,6 +130,20 @@ class GenieAdapter(FrameDiffusionModel):
         return x_t_minus_one
 
     def _epsilon(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
+        if self._cached_epsilon is not None:
+            assert (
+                x_t.trans.shape == self._cached_epsilon.shape
+            ), "Mismatch between cached epsilon and input frame."
+            return self._cached_epsilon
+
+        if self._cached_score is not None:
+            assert (
+                x_t.trans.shape == self._cached_score.shape
+            ), "Mismatch between cached score and input frame."
+            return -self._cached_score * self.model.sqrt_one_minus_alphas_cumprod[
+                t
+            ].view(-1, 1, 1)
+
         denoised_pile = []
         for batch in torch.split(torch.arange(x_t.shape[0]), self.batch_size):
             curr_batch_size = len(batch)

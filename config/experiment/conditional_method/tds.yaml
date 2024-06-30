@@ -2,3 +2,5 @@
 name: "tds"
 n_particles: ${experiment.n_samples}
 resampling_method: "residual"
+sigma: 0.05
+twist_scale: 1

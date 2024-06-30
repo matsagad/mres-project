@@ -106,6 +106,8 @@ def sample_given_motif(cfg: DictConfig) -> None:
     elif method == "tds":
         setup = TDS(model).with_config(
             resample_indices=resampling_method,
+            sigma=cond_cfg.sigma,
+            twist_scale=cond_cfg.twist_scale,
         )
 
     elif method == "fpssmc":
@@ -145,7 +147,7 @@ def sample_given_motif(cfg: DictConfig) -> None:
         os.makedirs(os.path.join(out, "traces"))
         # [K, T, N_AA, 3]
         samples_trans = torch.stack(
-            [sample.trans[mask[0] == 1].detach().cpu() for sample in samples]
+            [sample.trans[:, mask[0] == 1].detach().cpu() for sample in samples]
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):

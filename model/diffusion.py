@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from protein.frames import Frames
 from pytorch_lightning.core import LightningModule
 from torch import Tensor
 
 
-# Interface mainly built on top of genie/diffusion/diffusion.py
-# Might be too restrictive towards DDPMs?
+# Future TODO: make less restrictive to non-DDPM diffusion models
 class FrameDiffusionModel(LightningModule, ABC):
 
     @property
@@ -167,3 +167,41 @@ class FrameDiffusionModel(LightningModule, ABC):
     def with_noise_scale(self, noise_scale: float) -> "FrameDiffusionModel":
         self.noise_scale = noise_scale
         return self
+
+    @property
+    def cached_epsilon(self) -> Tensor:
+        return self._cached_epsilon
+
+    @forward_variance.setter
+    def cached_epsilon(self, _cached_epsilon: Tensor) -> None:
+        self._cached_epsilon = _cached_epsilon
+
+    @property
+    def cached_score(self) -> Tensor:
+        return self._cached_score
+
+    @forward_variance.setter
+    def cached_score(self, _cached_score: Tensor) -> None:
+        self._cached_score = _cached_score
+
+    @contextmanager
+    def with_epsilon(self, epsilon: Tensor) -> None:
+        try:
+            assert (
+                self._cached_epsilon is None
+            ), "Either context manager was nested or property _cached_epsilon was already set."
+            self._cached_epsilon = epsilon
+            yield
+        finally:
+            self._cached_epsilon = None
+
+    @contextmanager
+    def with_score(self, score: Tensor) -> None:
+        try:
+            assert (
+                self._cached_score is None
+            ), "Either context manager was nested or property _cached_score was already set."
+            self._cached_score = score
+            yield
+        finally:
+            self._cached_score = None
