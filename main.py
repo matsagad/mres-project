@@ -112,10 +112,12 @@ def sample_given_motif(cfg: DictConfig) -> None:
 
     elif method == "fpssmc":
         setup = FPSSMC(model).with_config(
+            forward_noise_y=cond_cfg.forward_noise_y,
             noisy_y=cond_cfg.noisy_y,
             particle_filter=cond_cfg.particle_filter,
             resample_indices=resampling_method,
             sigma=float(cond_cfg.sigma),
+            fixed_motif=cond_cfg.fixed_motif,
         )
 
     samples = setup.sample_given_motif(mask, motif, motif_mask)

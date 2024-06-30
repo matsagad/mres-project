@@ -81,6 +81,9 @@ class ReplacementMethod(ConditionalWrapper):
             pf_stats = {"ess": [], "w": []}
             w = torch.ones(K, device=self.device) / K
 
+        T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
+        score = self.model.score(x_T, T, mask)
+
         with torch.no_grad():
             for i in tqdm(
                 reversed(range(N_TIMESTEPS)),
@@ -92,7 +95,7 @@ class ReplacementMethod(ConditionalWrapper):
                 x_t.trans[:, mask[0] == 1] -= torch.mean(
                     x_t.trans[:, MOTIF_SEGMENT], dim=1
                 ).unsqueeze(1)
-                
+
                 # Replace motif
                 ## Index by i + 1 since ts_motifs[(T - 1) + 1] is x_{M}^{T}
                 x_t.trans[:, MOTIF_SEGMENT] = (1 - _gamma) * x_t.trans[
@@ -111,27 +114,36 @@ class ReplacementMethod(ConditionalWrapper):
 
                 # Re-weight based on motif at t-1
                 ## Find likelihood of getting motif when de-noised
-                log_w = self.model.reverse_log_likelihood(
-                    motif_trajectory[i], x_t, t, motif_mask, mask
-                )
+                with self.model.with_score(score):
+                    log_w = self.model.reverse_log_likelihood(
+                        motif_trajectory[i], x_t, t, motif_mask, mask
+                    )
                 log_sum_w = torch.logsumexp(log_w, dim=0)
                 w *= torch.exp(log_w - log_sum_w)
-                w /= torch.sum(w)
-                ess = (1 / torch.sum(w**2)).cpu()
+                if torch.all(w == 0):
+                    w[:] = 1 / K
+                    ess = 0
+                else:
+                    w /= w.sum()
+                    ess = (1 / torch.sum(w**2)).cpu()
 
                 ### Collect particle filtering stats
                 pf_stats["ess"].append(ess)
                 pf_stats["w"].append(w.cpu())
 
                 # Resample particles
-                if ess < 0.5 * K:
+                if ess <= 0.5 * K:
                     resampled_indices = self.resample_indices(w)
                     x_t.rots = x_t.rots[resampled_indices]
                     x_t.trans = x_t.trans[resampled_indices]
-                    w = torch.ones(K, device=self.device) / K
+                    w[:] = 1 / K
 
                 # Propose next step
-                x_t = self.model.reverse_diffuse(x_t, t, mask, noise_scale=NOISE_SCALE)
+                score = self.model.score(x_t, t, mask)
+                with self.model.with_score(score):
+                    x_t = self.model.reverse_diffuse(
+                        x_t, t, mask, noise_scale=NOISE_SCALE
+                    )
                 x_trajectory.append(x_t)
 
         # Save traces for debugging
