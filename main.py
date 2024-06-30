@@ -214,7 +214,7 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
 
     if method == "fpssmc":
         setup = FPSSMC(model).with_config(
-            noisy_motif=cond_cfg.noisy_motif,
+            noisy_y=cond_cfg.noisy_y,
             particle_filter=cond_cfg.particle_filter,
             resample_indices=resampling_method,
             sigma=float(cond_cfg.sigma),
@@ -262,7 +262,10 @@ def evaluate_samples(cfg: DictConfig) -> None:
                 ).numpy()
                 out_name = f"{file.name.split('.')[0]}.npy"
                 np.savetxt(
-                    os.path.join(out, "coords", out_name), c_alpha_coords, delimiter=","
+                    os.path.join(out, "coords", out_name),
+                    c_alpha_coords,
+                    fmt="%.3f",
+                    delimiter=",",
                 )
 
     # Load motif config file
@@ -283,9 +286,14 @@ def evaluate_samples(cfg: DictConfig) -> None:
         np.savetxt(
             os.path.join(path_to_masks, f"scaffold_{i}.npy"),
             motif_mask[0].numpy(),
+            fmt="%.3f",
+            delimiter=",",
         )
     np.savetxt(
-        os.path.join(path_to_masks, "motif.npy"), motif_backbones["CA"], delimiter=","
+        os.path.join(path_to_masks, "motif.npy"),
+        motif_backbones["CA"],
+        fmt="%.3f",
+        delimiter=",",
     )
 
     eval_out = os.path.join(out, "evaluation")
