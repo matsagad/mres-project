@@ -64,8 +64,8 @@ class TDS(ConditionalWrapper):
 
         ## Calculate log likelihood and its gradient
         log_p_tilde_T = log_likelihood(x_zero_hat, T)
+        (grad_log_p_tilde_T,) = torch.autograd.grad(log_p_tilde_T.sum(), x_T.trans)
         log_p_tilde_T = log_p_tilde_T - torch.logsumexp(log_p_tilde_T, dim=0)
-        grad_log_p_tilde_T = torch.autograd.grad(log_p_tilde_T.sum(), x_T.trans)[0]
 
         x_T.trans = x_T.trans.detach()
 
@@ -93,7 +93,11 @@ class TDS(ConditionalWrapper):
                     resampled_indices = self.resample_indices(w)
                     x_t.rots = x_t.rots[resampled_indices]
                     x_t.trans = x_t.trans[resampled_indices]
+
+                    score = score[resampled_indices]
                     log_p_tilde_t = log_p_tilde_t[resampled_indices]
+                    grad_log_p_tilde_t = grad_log_p_tilde_t[resampled_indices]
+
                     w[:] = 1 / K
 
                 ## Recenter with respect to motif segment's center-of-mass
@@ -126,12 +130,12 @@ class TDS(ConditionalWrapper):
                         x_zero_hat = self.model.predict_fully_denoised(x_t, t, mask)
 
                     log_p_tilde_t = log_likelihood(x_zero_hat, t)
+                    (grad_log_p_tilde_t,) = torch.autograd.grad(
+                        log_p_tilde_t.sum(), x_t.trans
+                    )
                     log_p_tilde_t = log_p_tilde_t - torch.logsumexp(
                         log_p_tilde_t, dim=0
                     )
-                    grad_log_p_tilde_t = torch.autograd.grad(
-                        log_p_tilde_t.sum(), x_t.trans
-                    )[0]
                 x_t.trans = x_t.trans.detach()
 
                 ## Reverse log likelihoods
