@@ -19,10 +19,12 @@ class TDS(ConditionalWrapper):
         resample_indices: Callable = residual_resample,
         sigma: float = 0.05,
         twist_scale: float = 1.0,
+        likelihood_method: str = "mask",
     ) -> "TDS":
         self.resample_indices = resample_indices
         self.sigma = sigma
         self.twist_scale = twist_scale
+        self.likelihood_method = likelihood_method
         return self
 
     def sample_given_motif(
@@ -42,14 +44,43 @@ class TDS(ConditionalWrapper):
         # Set-up motif
         x_motif = self.model.coords_to_frames(motif, motif_mask)
 
-        def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
-            centred_x_zero_hat_trans = x_zero_hat.trans[
-                :, OBSERVED_REGION
-            ] - torch.mean(x_zero_hat.trans[:, OBSERVED_REGION], dim=1).unsqueeze(1)
-            return -0.5 * (
-                ((centred_x_zero_hat_trans - x_motif.trans[:, OBSERVED_REGION]) ** 2)
-                / (self.model.forward_variance[t].view(-1, 1, 1) + sigma**2)
-            ).sum(dim=(1, 2))
+        if self.likelihood_method == "mask":
+
+            def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
+                centred_x_zero_hat_trans = x_zero_hat.trans[
+                    :, OBSERVED_REGION
+                ] - torch.mean(x_zero_hat.trans[:, OBSERVED_REGION], dim=1).unsqueeze(1)
+                return -0.5 * (
+                    (
+                        (centred_x_zero_hat_trans - x_motif.trans[:, OBSERVED_REGION])
+                        ** 2
+                    )
+                    / (self.model.forward_variance[t].view(-1, 1, 1) + sigma**2)
+                ).sum(dim=(1, 2))
+
+        elif self.likelihood_method == "distance":
+            N_OBSERVED = torch.sum(OBSERVED_REGION)
+            _i, _j = torch.triu_indices(N_OBSERVED, N_OBSERVED, offset=1)
+            dist_y = torch.cdist(
+                x_motif.trans[:, OBSERVED_REGION], x_motif.trans[:, OBSERVED_REGION]
+            )[:, _i, _j].view(1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
+
+            def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
+                dist_x_hat_0 = torch.cdist(
+                    x_zero_hat.trans[:, OBSERVED_REGION],
+                    x_zero_hat.trans[:, OBSERVED_REGION],
+                )[:, _i, _j].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
+
+                return (
+                    -0.5
+                    * ((dist_y - dist_x_hat_0) ** 2)
+                    / (self.model.forward_variance[t].view(-1, 1) + sigma**2)
+                ).sum(axis=1)
+
+        else:
+            raise KeyError(
+                f"No such supported likelihood method: {self.likelihood_method}."
+            )
 
         # Sample frames
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()

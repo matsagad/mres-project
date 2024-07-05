@@ -108,6 +108,7 @@ def sample_given_motif(cfg: DictConfig) -> None:
             resample_indices=resampling_method,
             sigma=cond_cfg.sigma,
             twist_scale=cond_cfg.twist_scale,
+            likelihood_method=cond_cfg.likelihood_method
         )
 
     elif method == "fpssmc":
