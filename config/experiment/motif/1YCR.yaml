@@ -1,0 +1,4 @@
+
+name: 1YCR
+path: ./data/motif_problems/1YCR.pdb
+contig_region: 10-40,B19-27,10-40

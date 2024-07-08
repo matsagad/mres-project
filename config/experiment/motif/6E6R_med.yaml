@@ -1,0 +1,4 @@
+
+name: 6E6R_med
+path: ./data/motif_problems/6E6R.pdb
+contig_region: 0-65,A23-35,0-65

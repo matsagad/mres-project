@@ -1,0 +1,4 @@
+
+name: 5IUS
+path: ./data/motif_problems/5IUS.pdb
+contig_region: 0-30,A119-140,15-40,A63-82,0-30

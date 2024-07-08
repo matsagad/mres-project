@@ -1,0 +1,4 @@
+
+name: il7ra_gc
+path: ./data/motif_problems/il7ra_gc.pdb
+contig_region: 25-40,A74-91,3-10,A8-27,5-10,A130-150

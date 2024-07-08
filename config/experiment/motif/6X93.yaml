@@ -1,0 +1,4 @@
+
+name: 6X93
+path: ./data/motif_problems/6X93.pdb
+contig_region: 0-5,D137-160,4-12,A14-48,24-40,A92-104,3-8

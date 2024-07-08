@@ -1,0 +1,4 @@
+
+name: 1BCF
+path: ./data/motif_problems/1BCF.pdb
+contig_region: 8-15,A92-99,16-30,A123-130,16-30,A47-54,16-30,A18-25,8-15

@@ -1,0 +1,4 @@
+
+name: 5TRV_long
+path: ./data/motif_problems/5TRV.pdb
+contig_region: 0-95,A45-65,0-95

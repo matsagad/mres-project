@@ -1,0 +1,4 @@
+
+name: 5TPN
+path: ./data/motif_problems/5TPN.pdb
+contig_region: 10-40,A163-181,10-40
