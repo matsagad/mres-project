@@ -71,19 +71,17 @@ def sample_given_motif(cfg: DictConfig) -> None:
     # according to Genie's custom config file above. Although, another option
     # is to set them with values from cfg in case we use other models.
 
-    motif_backbones = pdb_to_atom_backbone(cfg.experiment.motif)
-    masked_backbones, motif_mask = get_motif_mask(
+    motif_cfg = cfg.experiment.motif
+    motif_backbones = pdb_to_atom_backbone(motif_cfg.path)
+    motif_mask, mask, masked_backbones = get_motif_mask(
         motif_backbones,
-        cfg.experiment.sample_length,
         model.max_n_residues,
-        cfg.experiment.motif_contig_region,
-        mask_backbones=True,
+        motif_cfg.contig_region,
+        return_masked_backbones=True,
     )
     motif = masked_backbones["CA"].to(device)
     motif_mask = motif_mask.to(device)
-
-    mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
-    mask[:, : cfg.experiment.sample_length] = 1
+    mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
 
     cond_cfg = cfg.experiment.conditional_method
     method = cond_cfg.name
@@ -108,8 +106,11 @@ def sample_given_motif(cfg: DictConfig) -> None:
             resample_indices=resampling_method,
             sigma=cond_cfg.sigma,
             twist_scale=cond_cfg.twist_scale,
-            likelihood_method=cond_cfg.likelihood_method
+            likelihood_method=cond_cfg.likelihood_method,
         )
+        # TDS does not benefit from having duplicate particles, so
+        # can turn this optimisation off to avoid checking uniqueness.
+        setup.model.compute_unique_only = False
 
     elif method == "fpssmc":
         setup = FPSSMC(model).with_config(
@@ -138,13 +139,8 @@ def sample_given_motif(cfg: DictConfig) -> None:
         },
         os.path.join(out, "motif.pdb"),
     )
-
-    motif_cfg = {
-        "sample_length": cfg.experiment.sample_length,
-        "motif_contig_region": cfg.experiment.motif_contig_region,
-    }
     with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
-        f.write("\n".join(f"{k}: {v}" for k, v in motif_cfg.items()))
+        f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
 
     if cfg.experiment.keep_coords_trace:
         os.makedirs(os.path.join(out, "traces"))
@@ -254,6 +250,7 @@ def evaluate_samples(cfg: DictConfig) -> None:
     # Populate coords folder with CA atom coordinates of each sample
     path_to_coords = os.path.join(out, "coords")
     os.makedirs(path_to_coords)
+    sample_lengths = []
     with os.scandir(path_to_samples) as files:
         for file in files:
             if file.is_file() and file.name.endswith(".pdb"):
@@ -268,16 +265,16 @@ def evaluate_samples(cfg: DictConfig) -> None:
                     fmt="%.3f",
                     delimiter=",",
                 )
+                sample_lengths.append(len(c_alpha_coords))
 
     # Load motif config file
     motif_cfg = omegaconf.OmegaConf.load(path_to_motif_cfg)
     motif_backbones = pdb_to_atom_backbone(path_to_motif)
-    motif_mask = get_motif_mask(
+    motif_mask, _ = get_motif_mask(
         motif_backbones,
-        motif_cfg.sample_length,
-        motif_cfg.sample_length,
-        motif_cfg.motif_contig_region,
-        mask_backbones=False,
+        max(sample_lengths),
+        motif_cfg.contig_region,
+        return_masked_backbones=False,
     )
 
     # Populate motif_masks folder with bitmasks for each sample
@@ -286,7 +283,8 @@ def evaluate_samples(cfg: DictConfig) -> None:
     for i in range(n_samples):
         np.savetxt(
             os.path.join(path_to_masks, f"scaffold_{i}.npy"),
-            motif_mask[0].numpy(),
+            # Motif mask must be same size as sample lengths
+            motif_mask[0, : sample_lengths[i]].numpy(),
             fmt="%.3f",
             delimiter=",",
         )

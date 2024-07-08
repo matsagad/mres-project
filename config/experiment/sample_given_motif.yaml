@@ -1,10 +1,9 @@
 
 defaults:
   - conditional_method: "smcdiff"
+  - motif: "1BCF"
 
 name: "sample_given_motif"
 n_samples: 16
 sample_length: 128
 keep_coords_trace: False
-motif: ""
-motif_contig_region: ""

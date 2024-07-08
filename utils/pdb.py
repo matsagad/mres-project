@@ -88,11 +88,10 @@ def c_alpha_backbone_to_pdb(
 
 def get_motif_mask(
     motif_backbones: Dict[str, Tensor],
-    n_residues: int,
     max_n_residues: int,
     contig: str = None,
-    mask_backbones: bool = False,
-) -> Union[Tuple[Dict[str, Tensor], Tensor], Tensor]:
+    return_masked_backbones: bool = False,
+) -> Union[Tuple[Tensor, Tensor, Dict[str, Tensor]], Tuple[Tensor, Tensor]]:
     COMMA = ","
     DASH = "-"
     OFFSET = 1
@@ -101,15 +100,20 @@ def get_motif_mask(
 
     out = {atom: torch.zeros((1, max_n_residues, 3)) for atom in motif_backbones.keys()}
     motif_mask = torch.zeros((1, max_n_residues))
+    mask = torch.zeros((1, max_n_residues))
+
     if not contig:
+        # If not specified, put motif at the start and generate protein with
+        # total length equal to the maximum allowed.
         motif_mask[:, : motif_backbones[ATOM_TO_MASK].shape[0]] = 1
-        if not mask_backbones:
-            return motif_mask
+        mask[:, :max_n_residues] = 1
+        if not return_masked_backbones:
+            return motif_mask, mask
         for atom, backbone in motif_backbones.items():
             out[atom][:, : backbone.shape[0]] = backbone - torch.mean(
                 motif_backbones[ATOM_TO_CENTER], dim=0, keepdim=True
             )
-        return out, motif_mask
+        return motif_mask, mask, out
 
     trans_locations = []
     motif_locations = {atom: [] for atom in motif_backbones.keys()}
@@ -140,18 +144,21 @@ def get_motif_mask(
             curr += motif_end - motif_start
         else:
             if DASH in _range:
-                min_scaffold_segment, _ = map(int, _range.split(DASH))
+                min_segment_length, max_segment_length = map(int, _range.split(DASH))
+                # Use median scaffold length similar to TDS paper
+                scaffold_segment_length = (min_segment_length + max_segment_length) // 2
             else:
-                min_scaffold_segment = int(_range)
+                scaffold_segment_length = int(_range)
 
-            curr += min_scaffold_segment
+            curr += scaffold_segment_length
 
         assert (
-            curr + 1 <= n_residues
-        ), f"Exceeded experiment's sample length: ({curr + 1} > {n_residues})"
+            curr + 1 <= max_n_residues
+        ), f"Exceeded experiment's maximum number of residues: ({curr + 1} > {max_n_residues})"
 
-    if not mask_backbones:
-        return motif_mask
+    mask[:, : curr + 1] = 1
+    if not return_masked_backbones:
+        return motif_mask, mask
 
     motif_mean = _total / _n_motif_residues
 
@@ -159,4 +166,4 @@ def get_motif_mask(
         for atom, backbone in motif_backbones.items():
             out[atom][:, start:end] = motif_locations[atom][i] - motif_mean
 
-    return out, motif_mask
+    return motif_mask, mask, out
