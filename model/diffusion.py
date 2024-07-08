@@ -172,7 +172,7 @@ class FrameDiffusionModel(LightningModule, ABC):
     def cached_epsilon(self) -> Tensor:
         return self._cached_epsilon
 
-    @forward_variance.setter
+    @cached_epsilon.setter
     def cached_epsilon(self, _cached_epsilon: Tensor) -> None:
         self._cached_epsilon = _cached_epsilon
 
@@ -180,7 +180,7 @@ class FrameDiffusionModel(LightningModule, ABC):
     def cached_score(self) -> Tensor:
         return self._cached_score
 
-    @forward_variance.setter
+    @cached_score.setter
     def cached_score(self, _cached_score: Tensor) -> None:
         self._cached_score = _cached_score
 
