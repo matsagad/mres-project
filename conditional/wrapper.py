@@ -8,6 +8,10 @@ from typing import Dict
 from utils.path import out_dir
 
 
+class ConditionalWrapperConfig(ABC):
+    pass
+
+
 class ConditionalWrapper(ABC):
     def __init__(self, model: FrameDiffusionModel) -> None:
         self.model = model
@@ -30,11 +34,32 @@ class ConditionalWrapper(ABC):
     def verbose(self, _verbose: bool) -> None:
         self._verbose = _verbose
 
+    @property
+    def supports_condition_on_motif(self) -> bool:
+        return self._supports_condition_on_motif
+
+    @supports_condition_on_motif.setter
+    def supports_condition_on_motif(self, is_supported: bool) -> None:
+        self._supports_condition_on_motif = is_supported
+
+    @property
+    def supports_condition_on_symmetry(self) -> bool:
+        return self._supports_condition_on_symmetry
+
+    @supports_condition_on_symmetry.setter
+    def supports_condition_on_symmetry(self, is_supported: bool) -> None:
+        self._supports_condition_on_symmetry = is_supported
+
     @abstractmethod
     def sample_given_motif(
         self, mask: Tensor, motif: Tensor, motif_mask: Tensor
     ) -> Tensor:
         """Sample conditioned on motif being present"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
+        """Sample conditioned on point symmetry"""
         raise NotImplementedError
 
     def sample(self, mask: Tensor) -> Tensor:
@@ -44,14 +69,14 @@ class ConditionalWrapper(ABC):
         if not self.model.setup:
             self.setup_schedule()
 
-        x_T = self.sample_frames(mask)
+        x_T = self.model.sample_frames(mask)
         x_trajectory = [x_T]
         x_t = x_T
 
         with torch.no_grad():
-            for i in tqdm(
+            for i in tqdm.tqdm(
                 reversed(range(self.model.n_timesteps)),
-                desc="Reverse diffuse samples",
+                desc="Reverse diffusing samples",
                 total=self.model.n_timesteps,
                 disable=not self.verbose,
             ):
