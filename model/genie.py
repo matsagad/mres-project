@@ -28,6 +28,8 @@ class GenieAdapter(FrameDiffusionModel):
         self._cached_epsilon = None
         self._cached_score = None
 
+        self.compute_unique_only = False
+
     def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
         config = Config(f_config)
         model = Genie.load_from_checkpoint(f_weights, config=config)
@@ -144,17 +146,32 @@ class GenieAdapter(FrameDiffusionModel):
                 t
             ].view(-1, 1, 1)
 
+        x_t_rots = x_t.rots
+        x_t_trans = x_t.trans
+        return_indices = torch.arange(x_t_rots.shape[0])
+
+        if self.compute_unique_only:
+            # Adapted from https://github.com/pytorch/pytorch/issues/36748
+            unique, inverse = torch.unique(x_t.trans, dim=0, return_inverse=True)
+            perm = torch.arange(inverse.shape[0], device=inverse.device)
+            unique_indices = inverse.new_empty(unique.shape[0]).scatter_(
+                0, inverse, perm
+            )
+            x_t_rots = x_t_rots[unique_indices]
+            x_t_trans = x_t_trans[unique_indices]
+            return_indices = inverse
+
         denoised_pile = []
-        for batch in torch.split(torch.arange(x_t.shape[0]), self.batch_size):
+        for batch in torch.split(torch.arange(x_t_rots.shape[0]), self.batch_size):
             curr_batch_size = len(batch)
             denoised_trans = self.model.model(
-                T(x_t.rots[batch], x_t.trans[batch]),
+                T(x_t_rots[batch], x_t_trans[batch]),
                 t[:curr_batch_size],
                 mask[:curr_batch_size],
             ).trans.detach()
             denoised_pile.append(denoised_trans)
 
-        return x_t.trans - torch.cat(denoised_pile, dim=0)
+        return x_t.trans - torch.cat(denoised_pile, dim=0)[return_indices]
 
     def predict_fully_denoised(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
         epsilon = self._epsilon(x_t, t, mask)
