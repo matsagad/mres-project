@@ -1,7 +1,7 @@
-
 name: "tds"
-n_particles: ${experiment.n_samples}
+
+method: "tds"
+likelihood_method: "mask"
 resampling_method: "residual"
 sigma: 0.05
 twist_scale: 1
-likelihood_method: "mask" # mask, distance

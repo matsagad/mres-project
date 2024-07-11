@@ -1,30 +1,51 @@
-from conditional.wrapper import ConditionalWrapper
+from conditional import register_conditional_method
+from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
+from enum import Enum
 from model.diffusion import FrameDiffusionModel
 from protein.frames import Frames
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from typing import Callable
-from utils.resampling import residual_resample
+from utils.resampling import get_resampling_method
 
 
+class TDSLikelihoodMethod(str, Enum):
+    MASK = "mask"
+    DISTANCE = "distance"
+
+
+class TDSConfig(ConditionalWrapperConfig):
+    likelihood_method: TDSLikelihoodMethod
+    resampling_method: str
+    sigma: float
+    twist_scale: float
+
+
+@register_conditional_method("tds", TDSConfig)
 class TDS(ConditionalWrapper):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
         self.with_config()
 
+        self.supports_condition_on_motif = True
+        self.supports_condition_on_symmetry = False
+
+        # TDS does not benefit from having duplicate particles, so
+        # can turn this optimisation off to avoid checking uniqueness.
+        self.model.compute_unique_only = False
+
     def with_config(
         self,
-        resample_indices: Callable = residual_resample,
+        likelihood_method: TDSLikelihoodMethod = TDSLikelihoodMethod.MASK,
+        resampling_method: str = "residual",
         sigma: float = 0.05,
         twist_scale: float = 1.0,
-        likelihood_method: str = "mask",
     ) -> "TDS":
-        self.resample_indices = resample_indices
+        self.likelihood_method = likelihood_method
+        self.resample_indices = get_resampling_method(resampling_method)
         self.sigma = sigma
         self.twist_scale = twist_scale
-        self.likelihood_method = likelihood_method
         return self
 
     def sample_given_motif(
@@ -44,7 +65,7 @@ class TDS(ConditionalWrapper):
         # Set-up motif
         x_motif = self.model.coords_to_frames(motif, motif_mask)
 
-        if self.likelihood_method == "mask":
+        if self.likelihood_method == TDSLikelihoodMethod.MASK:
 
             def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
                 centred_x_zero_hat_trans = x_zero_hat.trans[
@@ -58,7 +79,7 @@ class TDS(ConditionalWrapper):
                     / (self.model.forward_variance[t].view(-1, 1, 1) + sigma**2)
                 ).sum(dim=(1, 2))
 
-        elif self.likelihood_method == "distance":
+        elif self.likelihood_method == TDSLikelihoodMethod.DISTANCE:
             N_OBSERVED = torch.sum(OBSERVED_REGION)
             _i, _j = torch.triu_indices(N_OBSERVED, N_OBSERVED, offset=1)
             dist_y = torch.cdist(
@@ -202,3 +223,6 @@ class TDS(ConditionalWrapper):
         self.save_stats(pf_stats)
 
         return x_trajectory
+
+    def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
+        raise NotImplementedError("")
