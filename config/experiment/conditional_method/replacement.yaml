@@ -1,4 +1,7 @@
-
 name: "replacement"
+
+method: "smcdiff"
 noisy_motif: True
-replacement_weight: 1
+particle_filter: False
+resampling_method: null
+replacement_weight: 1.0

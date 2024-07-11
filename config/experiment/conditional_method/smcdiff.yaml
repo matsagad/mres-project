@@ -1,6 +1,7 @@
-
 name: "smcdiff"
+
+method: "smcdiff"
 noisy_motif: True
-replacement_weight: 1
-n_particles: ${experiment.n_samples}
+particle_filter: True
 resampling_method: "residual"
+replacement_weight: 1.0

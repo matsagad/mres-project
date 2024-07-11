@@ -1,32 +1,51 @@
-from conditional.wrapper import ConditionalWrapper
+from conditional import register_conditional_method
+from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 import logging
 from model.diffusion import FrameDiffusionModel
 import torch
 from torch import Tensor
-from utils.resampling import residual_resample
+from utils.resampling import get_resampling_method
 from tqdm import tqdm
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
 
-class ReplacementMethod(ConditionalWrapper):
+class SMCDiffConfig(ConditionalWrapperConfig):
+    noisy_motif: bool
+    particle_filter: bool
+    replacement_weight: float
+    resampling_method: str
+
+
+@register_conditional_method("smcdiff", SMCDiffConfig)
+class SMCDiff(ConditionalWrapper):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
         self.with_config()
+
+        self.supports_condition_on_motif = True
+        self.supports_condition_on_symmetry = False
+
+        self.model.compute_unique_only = True
 
     def with_config(
         self,
         noisy_motif: bool = False,
         particle_filter: bool = False,
         replacement_weight: float = 1.0,
-        resample_indices: Callable = residual_resample,
-    ) -> "ReplacementMethod":
+        resampling_method: str = "residual",
+    ) -> "SMCDiff":
         self.noisy_motif = noisy_motif
         self.particle_filter = particle_filter
         self.replacement_weight = replacement_weight
-        self.resample_indices = resample_indices
+        
+        # We don't resample when particle_filter=False (i.e. for replacement method)
+        self.resample_indices = (
+            None
+            if resampling_method is None
+            else get_resampling_method(resampling_method)
+        )
         return self
 
     def sample_given_motif(
@@ -153,3 +172,6 @@ class ReplacementMethod(ConditionalWrapper):
         logger.info("Done de-noising samples.")
 
         return x_trajectory
+
+    def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
+        raise NotImplementedError("")
