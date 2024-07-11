@@ -1,35 +1,50 @@
-from conditional.wrapper import ConditionalWrapper
+from conditional import register_conditional_method
+from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 import math
 from model.diffusion import FrameDiffusionModel
 from protein.frames import Frames
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from typing import Callable
-from utils.resampling import residual_resample
+from utils.resampling import get_resampling_method
 
 
+class FPSSMCConfig(ConditionalWrapperConfig):
+    fixed_motif: bool
+    forward_y_seq: bool
+    noisy_y_seq: bool
+    particle_filter: bool
+    resampling_method: str
+    sigma: float
+
+
+@register_conditional_method("fpssmc", FPSSMCConfig)
 class FPSSMC(ConditionalWrapper):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
         self.with_config()
 
+        self.supports_condition_on_motif = True
+        self.supports_condition_on_symmetry = True
+
+        self.model.compute_unique_only = False
+
     def with_config(
         self,
-        forward_noise_y: bool = False,
-        noisy_y: bool = False,
-        particle_filter: bool = True,
-        resample_indices: Callable = residual_resample,
-        sigma: float = 0.05,
         fixed_motif: bool = True,
+        forward_y_seq: bool = False,
+        noisy_y_seq: bool = True,
+        particle_filter: bool = True,
+        resampling_method: str = "residual",
+        sigma: float = 0.1,
     ) -> "FPSSMC":
-        self.forward_noise_y = forward_noise_y
-        self.noisy_y = noisy_y
-        self.particle_filter = particle_filter
-        self.resample_indices = resample_indices
-        self.sigma = sigma
         self.fixed_motif = fixed_motif
+        self.forward_y_seq = forward_y_seq
+        self.noisy_y_seq = noisy_y_seq
+        self.particle_filter = particle_filter
+        self.resample_indices = get_resampling_method(resampling_method)
+        self.sigma = sigma
         return self
 
     def _general_3d_rot_matrix(self, thetas: Tensor, axis: Tensor) -> Tensor:
@@ -181,7 +196,7 @@ class FPSSMC(ConditionalWrapper):
         # (1) Generate sequence \{y^{t}\}^{T}_{t=0}
         y_0 = self.model.coords_to_frames(y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask)
 
-        if self.forward_noise_y:
+        if self.forward_y_seq:
             # Construct y sequence by forward diffusing the motif
             forward_noise_scale = -1.0
             c_noise_scale = 1 + sigma * math.sqrt(1 + forward_noise_scale)
@@ -204,10 +219,16 @@ class FPSSMC(ConditionalWrapper):
                 y_t_trans = torch.zeros(y_t.trans.shape, device=self.device)
                 y_t_trans[:, y_mask[0] == 1] = sqrt_alpha_t * (
                     y_t.trans[:, y_mask[0] == 1]
-                ) + c_noise_scale * sqrt_one_minus_alpha_t * torch.randn(
-                    y_t_trans[:, y_mask[0] == 1].shape, device=self.device
                 )
-                # Keep motif zero-centred
+
+                if self.noisy_y_seq:
+                    y_t_trans[:, y_mask[0] == 1] += (
+                        c_noise_scale
+                        * sqrt_one_minus_alpha_t
+                        * torch.randn(
+                            y_t_trans[:, y_mask[0] == 1].shape, device=self.device
+                        )
+                    )
                 if recenter_y:
                     y_t_trans[:, y_mask[0] == 1] -= torch.mean(
                         y_t_trans[:, y_mask[0] == 1], dim=1, keepdim=True
@@ -256,7 +277,7 @@ class FPSSMC(ConditionalWrapper):
                     - torch.sqrt(alpha_bar_t) * y_0.trans[:, OBSERVED_REGION]
                 )
 
-                if self.noisy_y:
+                if self.noisy_y_seq:
                     y_t_minus_one_trans[:, OBSERVED_REGION] += q_t * (
                         A @ torch.randn((D,), device=self.device)
                     ).view(-1, N_COORDS_PER_RESIDUE)
@@ -276,7 +297,7 @@ class FPSSMC(ConditionalWrapper):
         pf_stats = {"ess": [], "w": []}
 
         # (2) Generate backward sequence \{x^{t}\}^{T}_{t=0}
-        if self.forward_noise_y:
+        if self.forward_y_seq:
             x_T = self.model.sample_frames(mask)
         else:
             x_T = self.model.coords_to_frames(

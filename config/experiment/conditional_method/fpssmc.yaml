@@ -1,9 +1,9 @@
-
 name: "fpssmc"
-forward_noise_y: False
-noisy_y: True
+
+method: "fpssmc"
 fixed_motif: True
-sigma: 0.1
+forward_y_seq: False
+noisy_y_seq: True
 particle_filter: True
-n_particles: ${experiment.n_samples}
 resampling_method: "residual"
+sigma: 0.1
