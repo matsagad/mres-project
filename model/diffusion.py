@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from protein.frames import Frames
 from pytorch_lightning.core import LightningModule
 from torch import Tensor
+from typing import Generator
 
 
 # Future TODO: make less restrictive to non-DDPM diffusion models
@@ -185,7 +186,7 @@ class FrameDiffusionModel(LightningModule, ABC):
         self._cached_score = _cached_score
 
     @contextmanager
-    def with_epsilon(self, epsilon: Tensor) -> None:
+    def with_epsilon(self, epsilon: Tensor) -> Generator[any, any, any]:
         try:
             assert (
                 self._cached_epsilon is None
@@ -196,7 +197,7 @@ class FrameDiffusionModel(LightningModule, ABC):
             self._cached_epsilon = None
 
     @contextmanager
-    def with_score(self, score: Tensor) -> None:
+    def with_score(self, score: Tensor) -> Generator[any, any, any]:
         try:
             assert (
                 self._cached_score is None
