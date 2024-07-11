@@ -1,8 +1,10 @@
-
 defaults:
   - conditional_method: "smcdiff"
-  - motif: "1BCF"
+  - motif: "6EXZ_long"
 
+sweep_dir: "multirun\
+  /${experiment.name}/${experiment.motif.name}\
+  /K_${experiment.n_samples}/${experiment.conditional_method.name}"
 name: "sample_given_motif"
 n_samples: 16
 sample_length: 128
