@@ -271,13 +271,16 @@ def debug_gpu_stats(cfg: DictConfig) -> None:
     model.compute_unique_only = False
 
     # Check optimal batch size for hardware
-    sample_times = []
     for batch_size in exp_cfg.batch_size_range:
         torch.manual_seed(0)
+        torch.cuda.reset_peak_memory_stats(device)
 
         model.batch_size = batch_size
         timer = Timer(lambda: setup.sample(mask))
-        sample_time = timer.timeit(number=1) / (exp_cfg.n_trials * exp_cfg.n_samples)
 
-        sample_times.append(sample_time)
-        logger.info(f"batch_size: {batch_size}, sample_time: {sample_time:.8f}s")
+        sample_time = timer.timeit(number=1) / (exp_cfg.n_trials * exp_cfg.n_samples)
+        max_memory = torch.cuda.max_memory_allocated(device) / float(1 << 30)
+
+        logger.info(
+            f"batch_size: {batch_size}, sample_time: {sample_time:.8f}s, max_memory: {max_memory:.4f}GB"
+        )
