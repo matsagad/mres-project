@@ -7,6 +7,7 @@ from omegaconf import DictConfig
 import omegaconf
 import os
 import subprocess
+from timeit import Timer
 import torch
 from utils.path import out_dir
 from utils.pdb import (
@@ -246,3 +247,37 @@ def evaluate_samples(cfg: DictConfig) -> None:
         cwd=os.path.join(os.getcwd(), "submodules/genie"),
     )
     eval.wait()
+
+
+@register_experiment("debug_gpu_stats")
+def debug_gpu_stats(cfg: DictConfig) -> None:
+    exp_cfg = cfg.experiment
+
+    device = torch.device(cfg.model.device)
+
+    model = (
+        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
+        .with_batch_size(cfg.model.batch_size)
+        .with_noise_scale(cfg.model.noise_scale)
+        .to(device)
+    )
+    model.n_timesteps = exp_cfg.n_trials
+
+    mask = torch.zeros((exp_cfg.n_samples, model.max_n_residues), device=device)
+    mask[:, : model.max_n_residues] = 1
+
+    conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["smcdiff"]
+    setup = conditional_method(model)
+    model.compute_unique_only = False
+
+    # Check optimal batch size for hardware
+    sample_times = []
+    for batch_size in exp_cfg.batch_size_range:
+        torch.manual_seed(0)
+
+        model.batch_size = batch_size
+        timer = Timer(lambda: setup.sample(mask))
+        sample_time = timer.timeit(number=1) / (exp_cfg.n_trials * exp_cfg.n_samples)
+
+        sample_times.append(sample_time)
+        logger.info(f"batch_size: {batch_size}, sample_time: {sample_time:.8f}s")
