@@ -1,4 +1,5 @@
 from conditional import register_conditional_method
+from conditional.particle_filter import ParticleFilter
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 import logging
 from model.diffusion import FrameDiffusionModel
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class SMCDiffConfig(ConditionalWrapperConfig):
+    n_batches: int
     noisy_motif: bool
     particle_filter: bool
     replacement_weight: float
@@ -18,7 +20,7 @@ class SMCDiffConfig(ConditionalWrapperConfig):
 
 
 @register_conditional_method("smcdiff", SMCDiffConfig)
-class SMCDiff(ConditionalWrapper):
+class SMCDiff(ConditionalWrapper, ParticleFilter):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
@@ -31,15 +33,17 @@ class SMCDiff(ConditionalWrapper):
 
     def with_config(
         self,
+        n_batches: int = 1,
         noisy_motif: bool = False,
         particle_filter: bool = False,
         replacement_weight: float = 1.0,
         resampling_method: str = "residual",
     ) -> "SMCDiff":
+        self.n_batches = n_batches
         self.noisy_motif = noisy_motif
         self.particle_filter = particle_filter
         self.replacement_weight = replacement_weight
-        
+
         # We don't resample when particle_filter=False (i.e. for replacement method)
         self.resample_indices = (
             None
@@ -58,10 +62,14 @@ class SMCDiff(ConditionalWrapper):
         Replacement method as defined in the ProtDiff/SMCDiff
         paper: https://arxiv.org/pdf/2206.04119.pdf (Trippe et al., 2023)
         """
-
+        N_BATCHES = self.n_batches
         NOISE_SCALE = self.model.noise_scale
         N_TIMESTEPS = self.model.n_timesteps
         K = mask.shape[0]
+        K_batch = K // N_BATCHES
+        assert (
+            K % N_BATCHES == 0
+        ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
 
         # (1) Forward diffuse motif
         MOTIF_SEGMENT = motif_mask[0] == 1
@@ -98,7 +106,8 @@ class SMCDiff(ConditionalWrapper):
 
         if self.particle_filter:
             pf_stats = {"ess": [], "w": []}
-            w = torch.ones(K, device=self.device) / K
+            w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
+            ess = torch.zeros(N_BATCHES, device=self.device)
 
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
         score = self.model.score(x_T, T, mask)
@@ -136,26 +145,23 @@ class SMCDiff(ConditionalWrapper):
                 with self.model.with_score(score):
                     log_w = self.model.reverse_log_likelihood(
                         motif_trajectory[i], x_t, t, motif_mask, mask
-                    )
-                log_sum_w = torch.logsumexp(log_w, dim=0)
+                    ).view(N_BATCHES, K_batch)
+                log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
+
                 w *= torch.exp(log_w - log_sum_w)
-                if torch.all(w == 0):
-                    w[:] = 1 / K
-                    ess = 0
-                else:
-                    w /= w.sum()
-                    ess = (1 / torch.sum(w**2)).cpu()
+                all_zeros = torch.all(w == 0, dim=1)
+
+                w[all_zeros] = 1 / K_batch
+                ess[all_zeros] = 0
+                w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
+                ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
 
                 ### Collect particle filtering stats
-                pf_stats["ess"].append(ess)
+                pf_stats["ess"].append(ess.cpu())
                 pf_stats["w"].append(w.cpu())
 
                 # Resample particles
-                if ess <= 0.5 * K:
-                    resampled_indices = self.resample_indices(w)
-                    x_t.rots = x_t.rots[resampled_indices]
-                    x_t.trans = x_t.trans[resampled_indices]
-                    w[:] = 1 / K
+                self.resample(w, ess, [x_t.rots, x_t.trans])
 
                 # Propose next step
                 score = self.model.score(x_t, t, mask)

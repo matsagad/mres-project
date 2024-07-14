@@ -1,6 +1,7 @@
 name: "fpssmc"
 
 method: "fpssmc"
+n_batches: 1
 fixed_motif: True
 forward_y_seq: False
 noisy_y_seq: True

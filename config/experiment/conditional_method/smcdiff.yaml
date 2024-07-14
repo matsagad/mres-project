@@ -1,6 +1,7 @@
 name: "smcdiff"
 
 method: "smcdiff"
+n_batches: 1
 noisy_motif: True
 particle_filter: True
 resampling_method: "residual"

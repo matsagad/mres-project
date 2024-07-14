@@ -1,4 +1,5 @@
 from conditional import register_conditional_method
+from conditional.particle_filter import ParticleFilter
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 from enum import Enum
 from model.diffusion import FrameDiffusionModel
@@ -6,6 +7,7 @@ from protein.frames import Frames
 import torch
 from torch import Tensor
 from tqdm import tqdm
+from typing import Callable
 from utils.resampling import get_resampling_method
 
 
@@ -15,6 +17,7 @@ class TDSLikelihoodMethod(str, Enum):
 
 
 class TDSConfig(ConditionalWrapperConfig):
+    n_batches: int
     likelihood_method: TDSLikelihoodMethod
     resampling_method: str
     sigma: float
@@ -22,7 +25,7 @@ class TDSConfig(ConditionalWrapperConfig):
 
 
 @register_conditional_method("tds", TDSConfig)
-class TDS(ConditionalWrapper):
+class TDS(ConditionalWrapper, ParticleFilter):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
@@ -37,33 +40,21 @@ class TDS(ConditionalWrapper):
 
     def with_config(
         self,
+        n_batches: int = 1,
         likelihood_method: TDSLikelihoodMethod = TDSLikelihoodMethod.MASK,
         resampling_method: str = "residual",
         sigma: float = 0.05,
         twist_scale: float = 1.0,
     ) -> "TDS":
+        self.n_batches = n_batches
         self.likelihood_method = likelihood_method
         self.resample_indices = get_resampling_method(resampling_method)
         self.sigma = sigma
         self.twist_scale = twist_scale
         return self
 
-    def sample_given_motif(
-        self, mask: Tensor, motif: Tensor, motif_mask: Tensor
-    ) -> Tensor:
-        """
-        Twisted Diffusion Sampler (for fixed motif inpainting) as defined
-        in the paper: https://arxiv.org/pdf/2306.17775 (Wu et al., 2023)
-        """
-
-        N_TIMESTEPS = self.model.n_timesteps
-        K, N_RESIDUES = mask.shape
+    def get_likelihood(self, x_motif: Frames, motif_mask: Tensor) -> Callable:
         OBSERVED_REGION = motif_mask[0] == 1
-        sigma = self.sigma
-        twist_scale = self.twist_scale
-
-        # Set-up motif
-        x_motif = self.model.coords_to_frames(motif, motif_mask)
 
         if self.likelihood_method == TDSLikelihoodMethod.MASK:
 
@@ -76,10 +67,12 @@ class TDS(ConditionalWrapper):
                         (centred_x_zero_hat_trans - x_motif.trans[:, OBSERVED_REGION])
                         ** 2
                     )
-                    / (self.model.forward_variance[t].view(-1, 1, 1) + sigma**2)
+                    / (self.model.forward_variance[t].view(-1, 1, 1) + self.sigma**2)
                 ).sum(dim=(1, 2))
 
-        elif self.likelihood_method == TDSLikelihoodMethod.DISTANCE:
+            return log_likelihood
+
+        if self.likelihood_method == TDSLikelihoodMethod.DISTANCE:
             N_OBSERVED = torch.sum(OBSERVED_REGION)
             _i, _j = torch.triu_indices(N_OBSERVED, N_OBSERVED, offset=1)
             dist_y = torch.cdist(
@@ -95,13 +88,35 @@ class TDS(ConditionalWrapper):
                 return (
                     -0.5
                     * ((dist_y - dist_x_hat_0) ** 2)
-                    / (self.model.forward_variance[t].view(-1, 1) + sigma**2)
+                    / (self.model.forward_variance[t].view(-1, 1) + self.sigma**2)
                 ).sum(axis=1)
 
-        else:
-            raise KeyError(
-                f"No such supported likelihood method: {self.likelihood_method}."
-            )
+            return log_likelihood
+
+        raise KeyError(
+            f"No such supported likelihood method: {self.likelihood_method}."
+        )
+
+    def sample_given_motif(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor
+    ) -> Tensor:
+        """
+        Twisted Diffusion Sampler (for fixed motif inpainting) as defined
+        in the paper: https://arxiv.org/pdf/2306.17775 (Wu et al., 2023)
+        """
+        N_BATCHES = self.n_batches
+        N_TIMESTEPS = self.model.n_timesteps
+        K, N_RESIDUES = mask.shape
+        K_batch = K // N_BATCHES
+        assert (
+            K % N_BATCHES == 0
+        ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
+        OBSERVED_REGION = motif_mask[0] == 1
+        twist_scale = self.twist_scale
+
+        # Set-up motif
+        x_motif = self.model.coords_to_frames(motif, motif_mask)
+        log_likelihood = self.get_likelihood(x_motif, motif_mask)
 
         # Sample frames
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
@@ -117,14 +132,17 @@ class TDS(ConditionalWrapper):
         ## Calculate log likelihood and its gradient
         log_p_tilde_T = log_likelihood(x_zero_hat, T)
         (grad_log_p_tilde_T,) = torch.autograd.grad(log_p_tilde_T.sum(), x_T.trans)
-        log_p_tilde_T = log_p_tilde_T - torch.logsumexp(log_p_tilde_T, dim=0)
+        log_p_tilde_T_sum = torch.logsumexp(
+            log_p_tilde_T.view(N_BATCHES, K_batch), dim=1
+        ).repeat_interleave(K_batch)
+        log_p_tilde_T = log_p_tilde_T - log_p_tilde_T_sum
 
         x_T.trans = x_T.trans.detach()
 
         with torch.no_grad():
-            w = torch.exp(log_p_tilde_T)
-            w /= torch.sum(w)
-            ess = (1 / torch.sum(w**2)).cpu()
+            w = torch.exp(log_p_tilde_T).view(N_BATCHES, K_batch)
+            w /= torch.sum(w, dim=1, keepdim=True)
+            ess = 1 / torch.sum(w**2, dim=1).to(self.device)
 
         x_t = x_T
         log_p_tilde_t = log_p_tilde_T.detach()
@@ -140,17 +158,12 @@ class TDS(ConditionalWrapper):
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
             ):
-                # Resample particles
-                if ess <= 0.5 * K:
-                    resampled_indices = self.resample_indices(w)
-                    x_t.rots = x_t.rots[resampled_indices]
-                    x_t.trans = x_t.trans[resampled_indices]
-
-                    score = score[resampled_indices]
-                    log_p_tilde_t = log_p_tilde_t[resampled_indices]
-                    grad_log_p_tilde_t = grad_log_p_tilde_t[resampled_indices]
-
-                    w[:] = 1 / K
+                # Resample objects
+                self.resample(
+                    w,
+                    ess,
+                    [x_t.rots, x_t.trans, score, log_p_tilde_t, grad_log_p_tilde_t],
+                )
 
                 ## Recenter with respect to motif segment's center-of-mass
                 ## (This is not necessary but makes for easier visual comparison when plotted)
@@ -185,9 +198,10 @@ class TDS(ConditionalWrapper):
                     (grad_log_p_tilde_t,) = torch.autograd.grad(
                         log_p_tilde_t.sum(), x_t.trans
                     )
-                    log_p_tilde_t = log_p_tilde_t - torch.logsumexp(
-                        log_p_tilde_t, dim=0
-                    )
+                    log_p_tilde_t_sum = torch.logsumexp(
+                        log_p_tilde_t.view(N_BATCHES, K_batch), dim=1
+                    ).repeat_interleave(K_batch)
+                    log_p_tilde_t = log_p_tilde_t - log_p_tilde_t_sum
                 x_t.trans = x_t.trans.detach()
 
                 ## Reverse log likelihoods
@@ -195,30 +209,28 @@ class TDS(ConditionalWrapper):
                     reverse_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
                     )
-                reverse_llik -= torch.logsumexp(reverse_llik, dim=0)
 
                 with self.model.with_score(cond_score):
                     reverse_cond_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
                     )
-                reverse_cond_llik -= torch.logsumexp(reverse_cond_llik, dim=0)
 
-                log_w = (reverse_llik + log_p_tilde_t) - (
-                    reverse_cond_llik + log_p_tilde_t_plus_one
-                )
-                log_w = log_w - torch.max(log_w)
-                log_sum_w = torch.logsumexp(log_w, dim=0)
+                log_w = (
+                    (reverse_llik + log_p_tilde_t)
+                    - (reverse_cond_llik + log_p_tilde_t_plus_one)
+                ).view(N_BATCHES, K_batch)
+                log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
 
                 w *= torch.exp(log_w - log_sum_w)
-                if torch.all(w == 0):
-                    w[:] = 1 / K
-                    ess = 0
-                else:
-                    w /= w.sum()
-                    ess = (1 / torch.sum(w**2)).cpu()
+                all_zeros = torch.all(w == 0, dim=1)
+
+                w[all_zeros] = 1 / K_batch
+                ess[all_zeros] = 0
+                w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
+                ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
 
                 pf_stats["w"].append(w.cpu())
-                pf_stats["ess"].append(ess)
+                pf_stats["ess"].append(ess.cpu())
 
         self.save_stats(pf_stats)
 

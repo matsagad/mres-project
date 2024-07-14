@@ -33,30 +33,69 @@ def get_resampling_method(method: str) -> Callable:
 
 @register_resampling_method("residual")
 def residual_resample(w: Tensor) -> Tensor:
-    K = w.shape[0]
+    squeeze = False
+    if w.ndim == 1:
+        w = w.view(1, -1)
+        squeeze = True
+
+    assert w.ndim == 2
+
+    N, K = w.shape
     c_k = torch.floor(K * w).int()
     r_k = K * w - c_k
+    R = K - torch.sum(c_k, axis=1)
 
-    i_C = torch.repeat_interleave(torch.arange(K).to(w.device), c_k)
+    indices = []
+    for i in range(N):
+        i_C = torch.repeat_interleave(torch.arange(K).to(w.device), c_k[i])
+        if R[i] == 0:
+            indices.append(i_C)
+            continue
+        i_R = torch.multinomial(r_k[i], R[i], replacement=True)
+        indices.append(torch.cat((i_R, i_C)))
+    indices = torch.stack(indices)
 
-    R = K - torch.sum(c_k, axis=0)
-    if R == 0:
-        return i_C
-    i_R = torch.multinomial(r_k, R)
-    return torch.cat((i_R, i_C))
+    if squeeze:
+        return indices.squeeze(0)
+    return indices
 
 
 @register_resampling_method("stratified")
 def stratified_resample(w: Tensor) -> Tensor:
-    K = w.shape[0]
-    w_cumsum = torch.cumsum(w, 0)
-    samples = (torch.rand(K) + torch.arange(K).float()) / K
-    return torch.searchsorted(w_cumsum, samples.to(w.device))
+    squeeze = False
+    if w.ndim == 1:
+        w = w.view(1, -1)
+        squeeze = True
+
+    assert w.ndim == 2
+
+    N, K = w.shape
+    w_cumsum = torch.cumsum(w, 1)
+    samples = (torch.rand((N, K)) + torch.arange(K).float().view(1, K)) / K
+    indices = torch.searchsorted(w_cumsum, samples.to(w.device))
+
+    if squeeze:
+        return indices.squeeze(0)
+    return indices
 
 
 @register_resampling_method("systematic")
 def systematic_resample(w: Tensor) -> Tensor:
-    K = w.shape[0]
-    w_cumsum = torch.cumsum(w, 0)
-    samples = (torch.rand(1) + torch.arange(K).float()) / K
-    return torch.searchsorted(w_cumsum, samples.to(w.device))
+    squeeze = False
+    if w.ndim == 1:
+        w = w.view(1, -1)
+        squeeze = True
+
+    assert w.ndim == 2
+
+    N, K = w.shape
+    w_cumsum = torch.cumsum(w, 1)
+    samples = (
+        torch.rand(N).repeat_interleave(K).view(N, K)
+        + torch.arange(K).float().view(1, K)
+    ) / K
+    indices = torch.searchsorted(w_cumsum, samples.to(w.device))
+
+    if squeeze:
+        return indices.squeeze(0)
+    return indices

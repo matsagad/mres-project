@@ -1,4 +1,5 @@
 from conditional import register_conditional_method
+from conditional.particle_filter import ParticleFilter
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 import math
 from model.diffusion import FrameDiffusionModel
@@ -10,6 +11,7 @@ from utils.resampling import get_resampling_method
 
 
 class FPSSMCConfig(ConditionalWrapperConfig):
+    n_batches: int
     fixed_motif: bool
     forward_y_seq: bool
     noisy_y_seq: bool
@@ -19,7 +21,7 @@ class FPSSMCConfig(ConditionalWrapperConfig):
 
 
 @register_conditional_method("fpssmc", FPSSMCConfig)
-class FPSSMC(ConditionalWrapper):
+class FPSSMC(ConditionalWrapper, ParticleFilter):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
@@ -28,10 +30,11 @@ class FPSSMC(ConditionalWrapper):
         self.supports_condition_on_motif = True
         self.supports_condition_on_symmetry = True
 
-        self.model.compute_unique_only = False
+        self.model.compute_unique_only = True
 
     def with_config(
         self,
+        n_batches: int = 1,
         fixed_motif: bool = True,
         forward_y_seq: bool = False,
         noisy_y_seq: bool = True,
@@ -39,6 +42,7 @@ class FPSSMC(ConditionalWrapper):
         resampling_method: str = "residual",
         sigma: float = 0.1,
     ) -> "FPSSMC":
+        self.n_batches = n_batches
         self.fixed_motif = fixed_motif
         self.forward_y_seq = forward_y_seq
         self.noisy_y_seq = noisy_y_seq
@@ -181,9 +185,14 @@ class FPSSMC(ConditionalWrapper):
         defined in the FPS paper: https://openreview.net/pdf?id=tplXNcHZs1
         (Dou & Song, 2024)
         """
+        N_BATCHES = self.n_batches
         N_TIMESTEPS = self.model.n_timesteps
         N_COORDS_PER_RESIDUE = 3
         K, MAX_N_RESIDUES = mask.shape
+        K_batch = K // N_BATCHES
+        assert (
+            K % N_BATCHES == 0
+        ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
         sigma = self.sigma
 
         OBSERVED_REGION = y_mask[0] == 1
@@ -293,7 +302,8 @@ class FPSSMC(ConditionalWrapper):
             y_sequence.append(y_0)
             y_sequence = y_sequence[::-1]
 
-        w = torch.ones(K, device=self.device) / K
+        w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
+        ess = torch.zeros(N_BATCHES, device=self.device)
         pf_stats = {"ess": [], "w": []}
 
         # (2) Generate backward sequence \{x^{t}\}^{T}_{t=0}
@@ -378,27 +388,23 @@ class FPSSMC(ConditionalWrapper):
                 / (sigma**2 * (1 + forward_noise_scale * (1 - alpha_bar_t)))
             ).sum(axis=1)
 
-            log_w = reverse_llik + y_llik - reverse_cond_llik
-            log_sum_w = torch.logsumexp(log_w, dim=0)
+            log_w = (reverse_llik + y_llik - reverse_cond_llik).view(N_BATCHES, K_batch)
+            log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
 
             w *= torch.exp(log_w - log_sum_w)
-            if torch.all(w == 0):
-                w[:] = 1 / K
-                ess = 0
-            else:
-                w /= w.sum()
-                ess = (1 / torch.sum(w**2)).cpu()
+            all_zeros = torch.all(w == 0, dim=1)
 
-            pf_stats["ess"].append(ess)
+            w[all_zeros] = 1 / K_batch
+            ess[all_zeros] = 0
+            w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
+            ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
+
+            pf_stats["ess"].append(ess.cpu())
             pf_stats["w"].append(w.cpu())
 
             x_t = x_bar_t
 
-            if ess <= 0.5 * K:
-                resampled_indices = self.resample_indices(w)
-                x_t.rots = x_t.rots[resampled_indices]
-                x_t.trans = x_t.trans[resampled_indices]
-                w = torch.ones(K, device=self.device) / K
+            self.resample(w, ess, [x_t.rots, x_t.trans])
 
             x_sequence.append(x_t)
 

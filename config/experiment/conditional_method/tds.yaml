@@ -1,6 +1,7 @@
 name: "tds"
 
 method: "tds"
+n_batches: 1
 likelihood_method: "mask"
 resampling_method: "residual"
 sigma: 0.05
