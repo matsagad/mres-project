@@ -18,7 +18,7 @@ class ParticleFilter(ABC):
         n_batches, K_batch = w.shape
         K = n_batches * K_batch
 
-        need_resampling = ess.cpu() <= 0.5 * K
+        need_resampling = ess.cpu() <= 0.5 * K_batch
         w_to_resample = w[need_resampling]
 
         if w_to_resample.numel() != 0:
