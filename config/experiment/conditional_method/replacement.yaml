@@ -1,6 +1,7 @@
 name: "replacement"
 
 method: "smcdiff"
+n_batches: 1
 noisy_motif: True
 particle_filter: False
 resampling_method: null
