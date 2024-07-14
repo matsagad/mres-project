@@ -14,7 +14,7 @@ class GenieAdapter(FrameDiffusionModel):
         super().__init__()
         self.model = model
 
-        self.batch_size = 5
+        self.batch_size = 8
         self.n_timesteps = model.config.diffusion["n_timestep"]
         self.max_n_residues = model.config.io["max_n_res"]
 

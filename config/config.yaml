@@ -4,8 +4,8 @@ defaults:
   - experiment: "none"
 
 model:
-  batch_size: 5
-  device: "cuda:1"
+  batch_size: 8
+  device: "cuda"
   max_n_residues: ???
 
 experiment:
