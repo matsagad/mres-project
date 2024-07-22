@@ -20,9 +20,10 @@ def register_conditional_method(
             wrapper_config = {}
             for key, value in config_values.items():
                 if key not in config.__annotations__:
-                    assert (
-                        key == "name" or key == "method"
-                    ), f"Did you forget to add '{key}' key in the {name} config class and/or YAML file?"
+                    assert key == "name" or key == "method", (
+                        f"Did you forget to add '{key}' in the {name} config class? "
+                        f"It should share the same parameters with the YAML file."
+                    )
                     continue
                 try:
                     wrapper_config[key] = (
