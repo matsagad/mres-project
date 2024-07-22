@@ -3,6 +3,6 @@ name: "tds"
 method: "tds"
 n_batches: 1
 likelihood_method: "mask"
+likelihood_sigma: 0.05
 resampling_method: "residual"
-sigma: 0.05
 twist_scale: 1

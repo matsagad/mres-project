@@ -1,5 +1,5 @@
 from conditional import register_conditional_method
-from conditional.particle_filter import ParticleFilter
+from conditional.components.particle_filter import ParticleFilter
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 import logging
 from model.diffusion import FrameDiffusionModel

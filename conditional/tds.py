@@ -1,26 +1,18 @@
 from conditional import register_conditional_method
-from conditional.particle_filter import ParticleFilter
+from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
-from enum import Enum
 from model.diffusion import FrameDiffusionModel
-from protein.frames import Frames
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from typing import Callable
 from utils.resampling import get_resampling_method
-
-
-class TDSLikelihoodMethod(str, Enum):
-    MASK = "mask"
-    DISTANCE = "distance"
 
 
 class TDSConfig(ConditionalWrapperConfig):
     n_batches: int
-    likelihood_method: TDSLikelihoodMethod
+    likelihood_method: LikelihoodMethod
+    likelihood_sigma: float
     resampling_method: str
-    sigma: float
     twist_scale: float
 
 
@@ -41,61 +33,17 @@ class TDS(ConditionalWrapper, ParticleFilter):
     def with_config(
         self,
         n_batches: int = 1,
-        likelihood_method: TDSLikelihoodMethod = TDSLikelihoodMethod.MASK,
+        likelihood_method: LikelihoodMethod = LikelihoodMethod.MASK,
+        likelihood_sigma: float = 0.05,
         resampling_method: str = "residual",
-        sigma: float = 0.05,
         twist_scale: float = 1.0,
     ) -> "TDS":
         self.n_batches = n_batches
         self.likelihood_method = likelihood_method
+        self.likelihood_sigma = likelihood_sigma
         self.resample_indices = get_resampling_method(resampling_method)
-        self.sigma = sigma
         self.twist_scale = twist_scale
         return self
-
-    def get_likelihood(self, x_motif: Frames, motif_mask: Tensor) -> Callable:
-        OBSERVED_REGION = motif_mask[0] == 1
-
-        if self.likelihood_method == TDSLikelihoodMethod.MASK:
-
-            def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
-                centred_x_zero_hat_trans = x_zero_hat.trans[
-                    :, OBSERVED_REGION
-                ] - torch.mean(x_zero_hat.trans[:, OBSERVED_REGION], dim=1).unsqueeze(1)
-                return -0.5 * (
-                    (
-                        (centred_x_zero_hat_trans - x_motif.trans[:, OBSERVED_REGION])
-                        ** 2
-                    )
-                    / (self.model.forward_variance[t].view(-1, 1, 1) + self.sigma**2)
-                ).sum(dim=(1, 2))
-
-            return log_likelihood
-
-        if self.likelihood_method == TDSLikelihoodMethod.DISTANCE:
-            N_OBSERVED = torch.sum(OBSERVED_REGION)
-            _i, _j = torch.triu_indices(N_OBSERVED, N_OBSERVED, offset=1)
-            dist_y = torch.cdist(
-                x_motif.trans[:, OBSERVED_REGION], x_motif.trans[:, OBSERVED_REGION]
-            )[:, _i, _j].view(1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
-
-            def log_likelihood(x_zero_hat: Frames, t: Tensor) -> Tensor:
-                dist_x_hat_0 = torch.cdist(
-                    x_zero_hat.trans[:, OBSERVED_REGION],
-                    x_zero_hat.trans[:, OBSERVED_REGION],
-                )[:, _i, _j].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
-
-                return (
-                    -0.5
-                    * ((dist_y - dist_x_hat_0) ** 2)
-                    / (self.model.forward_variance[t].view(-1, 1) + self.sigma**2)
-                ).sum(axis=1)
-
-            return log_likelihood
-
-        raise KeyError(
-            f"No such supported likelihood method: {self.likelihood_method}."
-        )
 
     def sample_given_motif(
         self, mask: Tensor, motif: Tensor, motif_mask: Tensor
@@ -115,13 +63,15 @@ class TDS(ConditionalWrapper, ParticleFilter):
         twist_scale = self.twist_scale
 
         # Set-up motif
-        x_motif = self.model.coords_to_frames(motif, motif_mask)
-        log_likelihood = self.get_likelihood(x_motif, motif_mask)
+        y_mask = motif_mask
+        y_zero = self.model.coords_to_frames(motif, motif_mask)
+        log_likelihood = self.get_log_likelihood(self.likelihood_method)
 
         # Sample frames
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
         x_T = self.model.sample_frames(mask)
         x_T.trans.requires_grad = True
+        alpha_bar_T = 1 - self.model.forward_variance[T[0]]
 
         # Initialise weights
         score = self.model.score(x_T, T, mask)
@@ -130,7 +80,8 @@ class TDS(ConditionalWrapper, ParticleFilter):
             x_zero_hat = self.model.predict_fully_denoised(x_T, T, mask)
 
         ## Calculate log likelihood and its gradient
-        log_p_tilde_T = log_likelihood(x_zero_hat, T)
+        variance = 1 - alpha_bar_T + self.likelihood_sigma**2
+        log_p_tilde_T = log_likelihood(x_zero_hat, y_zero, y_mask, variance)
         (grad_log_p_tilde_T,) = torch.autograd.grad(log_p_tilde_T.sum(), x_T.trans)
         log_p_tilde_T_sum = torch.logsumexp(
             log_p_tilde_T.view(N_BATCHES, K_batch), dim=1
@@ -188,13 +139,19 @@ class TDS(ConditionalWrapper, ParticleFilter):
                 log_p_tilde_t_plus_one = log_p_tilde_t
 
                 # Update weights
+                alpha_bar_t = 1 - self.model.forward_variance[t[0]]
                 x_t.trans.requires_grad = True
                 with torch.enable_grad():
                     score = self.model.score(x_t, t, mask)
                     with self.model.with_score(score):
                         x_zero_hat = self.model.predict_fully_denoised(x_t, t, mask)
 
-                    log_p_tilde_t = log_likelihood(x_zero_hat, t)
+                    # We use Var(x_t | x_0) := (1 - alpha_bar_t) here but add
+                    # some tiny sigma^2 since it goes to 0 as t goes to 0
+                    variance_t = 1 - alpha_bar_t + self.likelihood_sigma**2
+                    log_p_tilde_t = log_likelihood(
+                        x_zero_hat, y_zero, y_mask, variance_t
+                    )
                     (grad_log_p_tilde_t,) = torch.autograd.grad(
                         log_p_tilde_t.sum(), x_t.trans
                     )

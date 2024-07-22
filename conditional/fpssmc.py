@@ -1,7 +1,10 @@
 from conditional import register_conditional_method
-from conditional.particle_filter import ParticleFilter
+from conditional.components.observation_generator import (
+    LinearObservationGenerator,
+    ObservationGenerationMethod,
+)
+from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
-import math
 from model.diffusion import FrameDiffusionModel
 from protein.frames import Frames
 import torch
@@ -13,15 +16,15 @@ from utils.resampling import get_resampling_method
 class FPSSMCConfig(ConditionalWrapperConfig):
     n_batches: int
     fixed_motif: bool
-    forward_y_seq: bool
-    noisy_y_seq: bool
+    likelihood_sigma: float
+    observed_sequence_method: ObservationGenerationMethod
+    observed_sequence_noised: bool
     particle_filter: bool
     resampling_method: str
-    sigma: float
 
 
 @register_conditional_method("fpssmc", FPSSMCConfig)
-class FPSSMC(ConditionalWrapper, ParticleFilter):
+class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
     def __init__(self, model: FrameDiffusionModel) -> None:
         super().__init__(model)
@@ -36,19 +39,19 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
         self,
         n_batches: int = 1,
         fixed_motif: bool = True,
-        forward_y_seq: bool = False,
-        noisy_y_seq: bool = True,
+        likelihood_sigma: float = 0.1,
+        observed_sequence_method: ObservationGenerationMethod = ObservationGenerationMethod.BACKWARD,
+        observed_sequence_noised: bool = True,
         particle_filter: bool = True,
         resampling_method: str = "residual",
-        sigma: float = 0.1,
     ) -> "FPSSMC":
         self.n_batches = n_batches
         self.fixed_motif = fixed_motif
-        self.forward_y_seq = forward_y_seq
-        self.noisy_y_seq = noisy_y_seq
+        self.likelihood_sigma = likelihood_sigma
+        self.observed_sequence_method = observed_sequence_method
+        self.observed_sequence_noised = observed_sequence_noised
         self.particle_filter = particle_filter
         self.resample_indices = get_resampling_method(resampling_method)
-        self.sigma = sigma
         return self
 
     def _general_3d_rot_matrix(self, thetas: Tensor, axis: Tensor) -> Tensor:
@@ -184,6 +187,8 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
         Filtering Posterior Sampling with Sequential Monte Carlo as
         defined in the FPS paper: https://openreview.net/pdf?id=tplXNcHZs1
         (Dou & Song, 2024)
+
+        TODO: Generalise for d != N x 3, i.e. a non-3D projection.
         """
         N_BATCHES = self.n_batches
         N_TIMESTEPS = self.model.n_timesteps
@@ -193,7 +198,7 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
         assert (
             K % N_BATCHES == 0
         ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
-        sigma = self.sigma
+        sigma = self.likelihood_sigma
 
         OBSERVED_REGION = y_mask[0] == 1
         N_RESIDUES = (mask[0] == 1).sum().item()
@@ -202,119 +207,32 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
         d = N_OBSERVED * N_COORDS_PER_RESIDUE
         assert d == A.shape[0] and D == A.shape[1]
 
-        # (1) Generate sequence \{y^{t}\}^{T}_{t=0}
-        y_0 = self.model.coords_to_frames(y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask)
-
-        if self.forward_y_seq:
-            # Construct y sequence by forward diffusing the motif
-            forward_noise_scale = -1.0
-            c_noise_scale = 1 + sigma * math.sqrt(1 + forward_noise_scale)
-            y_t = y_0
-            if recenter_y:
-                y_t.trans[:, y_mask[0] == 1] -= torch.mean(
-                    y_t.trans[:, y_mask[0] == 1], dim=1, keepdim=True
-                )
-            y_sequence = [y_t]
-            for i in tqdm(
-                range(N_TIMESTEPS),
-                desc="Generating {y_t}",
-                total=N_TIMESTEPS,
-                disable=not self.verbose,
-            ):
-                t = torch.tensor([i] * y_t.shape[0], device=self.device).long()
-                sqrt_alpha_t = torch.sqrt(1 - self.model.variance[t]).view(-1, 1, 1)
-                sqrt_one_minus_alpha_t = self.model.sqrt_variance[t].view(-1, 1, 1)
-
-                y_t_trans = torch.zeros(y_t.trans.shape, device=self.device)
-                y_t_trans[:, y_mask[0] == 1] = sqrt_alpha_t * (
-                    y_t.trans[:, y_mask[0] == 1]
-                )
-
-                if self.noisy_y_seq:
-                    y_t_trans[:, y_mask[0] == 1] += (
-                        c_noise_scale
-                        * sqrt_one_minus_alpha_t
-                        * torch.randn(
-                            y_t_trans[:, y_mask[0] == 1].shape, device=self.device
-                        )
-                    )
-                if recenter_y:
-                    y_t_trans[:, y_mask[0] == 1] -= torch.mean(
-                        y_t_trans[:, y_mask[0] == 1], dim=1, keepdim=True
-                    )
-                y_t = self.model.coords_to_frames(y_t_trans, y_mask)
-
-                y_sequence.append(y_t)
-        else:
-            # Construct the y sequence backwards by recursively interpolating
-            # with the motif and matching the reverse-process for x
+        # (1) Generate sequence {y_t}
+        if self.observed_sequence_method == ObservationGenerationMethod.BACKWARD:
             epsilon_T = self.model.sample_frames(mask[:1])
-            y_T_trans = torch.zeros(y_0.trans.shape, device=self.device)
-            y_T_trans[:, OBSERVED_REGION] = (
-                epsilon_T.trans[:, :N_RESIDUES].view(D) @ A.T
-            ).view(1, -1, N_COORDS_PER_RESIDUE)
-            y_T = self.model.coords_to_frames(y_T_trans, y_mask)
-            forward_noise_scale = -1.0
+            x_T = self.model.coords_to_frames(
+                torch.tile(epsilon_T.trans, (K, 1, 1)), mask
+            )
+        else:
+            x_T = self.model.sample_frames(mask)
 
-            y_t = y_T
-            y_sequence = [y_T]
-
-            for i in tqdm(
-                reversed(range(N_TIMESTEPS)),
-                desc="Generating {y_t}",
-                total=N_TIMESTEPS,
-                disable=not self.verbose,
-            ):
-                t = torch.tensor([i] * y_t.shape[0], device=self.device).long()
-
-                alpha_bar_t = 1 - self.model.forward_variance[t]
-                alpha_bar_t_minus_one = 1 - (
-                    self.model.forward_variance[t - 1] if t[0] > 0 else torch.tensor(0)
-                )
-
-                c = self.model.variance[t] / (1 - alpha_bar_t)
-                p_t = torch.sqrt(
-                    (1 - c) * (1 - alpha_bar_t_minus_one) / (1 - alpha_bar_t)
-                )
-                q_t = torch.sqrt(c * (1 - alpha_bar_t_minus_one))
-
-                y_t_minus_one_trans = torch.zeros(y_0.trans.shape, device=self.device)
-                y_t_minus_one_trans[:, OBSERVED_REGION] = torch.sqrt(
-                    alpha_bar_t_minus_one
-                ) * y_0.trans[:, OBSERVED_REGION] + p_t * (
-                    y_t.trans[:, OBSERVED_REGION]
-                    - torch.sqrt(alpha_bar_t) * y_0.trans[:, OBSERVED_REGION]
-                )
-
-                if self.noisy_y_seq:
-                    y_t_minus_one_trans[:, OBSERVED_REGION] += q_t * (
-                        A @ torch.randn((D,), device=self.device)
-                    ).view(-1, N_COORDS_PER_RESIDUE)
-                if recenter_y:
-                    y_t_minus_one_trans[:, OBSERVED_REGION] -= torch.mean(
-                        y_t_minus_one_trans[:, OBSERVED_REGION], dim=1, keepdim=True
-                    )
-                y_t_minus_one = self.model.coords_to_frames(y_t_minus_one_trans, y_mask)
-
-                y_t = y_t_minus_one
-                y_sequence.append(y_t)
-
-            y_sequence.append(y_0)
-            y_sequence = y_sequence[::-1]
+        y_zero = self.model.coords_to_frames(
+            y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask
+        )
+        y_sequence = self.generate_observed_sequence(
+            mask, y_zero, y_mask, A, x_T, recenter_y=recenter_y
+        )
 
         w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
         ess = torch.zeros(N_BATCHES, device=self.device)
         pf_stats = {"ess": [], "w": []}
 
-        # (2) Generate backward sequence \{x^{t}\}^{T}_{t=0}
-        if self.forward_y_seq:
-            x_T = self.model.sample_frames(mask)
-        else:
-            x_T = self.model.coords_to_frames(
-                torch.tile(epsilon_T.trans, (K, 1, 1)), mask
-            )
+        # (2) Generate sequence {x_t}
+        log_likelihood = self.get_log_likelihood(LikelihoodMethod.MATRIX)
+
         x_sequence = [x_T]
         x_t = x_T
+        A_T_A = A.T @ A
 
         for i in tqdm(
             reversed(range(N_TIMESTEPS)),
@@ -330,23 +248,24 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
             covariance_inverse = torch.zeros((D, D), device=self.device)
             covariance_inverse[range(D), range(D)] = 1 / self.model.variance[t[:1]]
 
-            score = self.model.score(x_t, t, mask)
+            with torch.no_grad():
+                score = self.model.score(x_t, t, mask)
             with self.model.with_score(score):
                 mean = self.model.reverse_diffuse_deterministic(x_t, t, mask)
             if recenter_x:
                 # Translate mean so that motif segment is centred at zero
                 mean.trans[:, :N_RESIDUES] -= torch.mean(
-                    mean.trans[:, y_mask[0] == 1], dim=1
+                    mean.trans[:, OBSERVED_REGION], dim=1
                 ).unsqueeze(1)
 
-            covariance_fps_inverse = covariance_inverse + (A.T @ A) / (
+            covariance_fps_inverse = covariance_inverse + A_T_A / (
                 sigma**2 * alpha_bar_t
             )
             covariance_fps = torch.inverse(covariance_fps_inverse)
 
             mean_fps = (
                 mean.trans[:, :N_RESIDUES].view(-1, D) @ covariance_inverse.T
-                + (A.T @ y_sequence[t[:1]].trans[:, y_mask[0] == 1].view(d))
+                + (A.T @ y_sequence[t[0]].trans[:, OBSERVED_REGION].view(d))
                 / (sigma**2 * alpha_bar_t)
             ) @ covariance_fps.T
 
@@ -376,17 +295,10 @@ class FPSSMC(ConditionalWrapper, ParticleFilter):
             if recenter_x:
                 # Translate mean so that motif segment is centred at zero
                 x_bar_t.trans[:, :N_RESIDUES] -= torch.mean(
-                    x_bar_t.trans[:, y_mask[0] == 1], dim=1
+                    x_bar_t.trans[:, OBSERVED_REGION], dim=1
                 ).unsqueeze(1)
-            y_llik = (
-                -0.5
-                * (
-                    y_sequence[t[:1]].trans[:, y_mask[0] == 1].view(-1, d)
-                    - x_bar_t.trans[:, :N_RESIDUES].view(-1, D) @ A.T
-                )
-                ** 2
-                / (sigma**2 * (1 + forward_noise_scale * (1 - alpha_bar_t)))
-            ).sum(axis=1)
+            variance_t = alpha_bar_t * self.likelihood_sigma**2
+            y_llik = log_likelihood(x_bar_t, y_sequence[t[0]], y_mask, A, variance_t)
 
             log_w = (reverse_llik + y_llik - reverse_cond_llik).view(N_BATCHES, K_batch)
             log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
