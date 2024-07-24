@@ -6,9 +6,10 @@ import torch
 import tqdm
 from typing import Dict
 from utils.path import out_dir
+from utils.registry import ConfigOutline
 
 
-class ConditionalWrapperConfig(ABC):
+class ConditionalWrapperConfig(ConfigOutline):
     pass
 
 
