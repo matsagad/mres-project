@@ -1,7 +1,7 @@
 from conditional import CONDITIONAL_METHOD_REGISTRY
 from experiments import register_experiment
 import logging
-from model.genie import GenieAdapter
+from model import DIFFUSION_MODEL_REGISTRY
 import numpy as np
 from omegaconf import DictConfig
 import omegaconf
@@ -23,18 +23,15 @@ logger = logging.getLogger(__name__)
 
 @register_experiment("sample_given_motif")
 def sample_given_motif(cfg: DictConfig) -> None:
-    device = torch.device(cfg.model.device)
+    model_cfg = cfg.model
+    device = torch.device(model_cfg.device)
 
-    model = (
-        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
-        .with_batch_size(cfg.model.batch_size)
-        .with_noise_scale(cfg.model.noise_scale)
-        .to(device)
-    )
-
-    # Both model.max_n_residues and model.n_timesteps are already set
-    # according to Genie's custom config file above. Although, another option
-    # is to set them with values from cfg in case we use other models.
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(device)
 
     motif_cfg = cfg.experiment.motif
     motif_backbones = pdb_to_atom_backbone(motif_cfg.path)
@@ -91,14 +88,15 @@ def sample_given_motif(cfg: DictConfig) -> None:
 
 @register_experiment("sample_unconditional")
 def sample_unconditional(cfg: DictConfig) -> None:
-    device = torch.device(cfg.model.device)
+    model_cfg = cfg.model
+    device = torch.device(model_cfg.device)
 
-    model = (
-        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
-        .with_batch_size(cfg.model.batch_size)
-        .with_noise_scale(cfg.model.noise_scale)
-        .to(device)
-    )
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(device)
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
@@ -129,14 +127,15 @@ def sample_unconditional(cfg: DictConfig) -> None:
 
 @register_experiment("sample_given_symmetry")
 def sample_given_symmetry(cfg: DictConfig) -> None:
-    device = torch.device(cfg.model.device)
+    model_cfg = cfg.model
+    device = torch.device(model_cfg.device)
 
-    model = (
-        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
-        .with_batch_size(cfg.model.batch_size)
-        .with_noise_scale(cfg.model.noise_scale)
-        .to(device)
-    )
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(device)
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
@@ -252,15 +251,16 @@ def evaluate_samples(cfg: DictConfig) -> None:
 @register_experiment("debug_gpu_stats")
 def debug_gpu_stats(cfg: DictConfig) -> None:
     exp_cfg = cfg.experiment
+    model_cfg = cfg.model
 
-    device = torch.device(cfg.model.device)
+    device = torch.device(model_cfg.device)
 
-    model = (
-        GenieAdapter.from_weights_and_config(cfg.model.weights, cfg.model.config)
-        .with_batch_size(cfg.model.batch_size)
-        .with_noise_scale(cfg.model.noise_scale)
-        .to(device)
-    )
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(device)
     model.n_timesteps = exp_cfg.n_trials
 
     mask = torch.zeros((exp_cfg.n_samples, model.max_n_residues), device=device)

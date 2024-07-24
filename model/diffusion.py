@@ -4,6 +4,11 @@ from protein.frames import Frames
 from pytorch_lightning.core import LightningModule
 from torch import Tensor
 from typing import Generator
+from utils.registry import ConfigOutline
+
+
+class DiffusionModelConfig(ConfigOutline):
+    pass
 
 
 # Future TODO: make less restrictive to non-DDPM diffusion models

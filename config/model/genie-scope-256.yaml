@@ -1,6 +1,7 @@
+name: "genie"
 
-config: "submodules/genie/weights/scope_l_256/configuration"
-weights: "submodules/genie/weights/scope_l_256/epoch=29999.ckpt"
-noise_scale: 0.6
+f_config: "submodules/genie/weights/scope_l_256/configuration"
+f_weights: "submodules/genie/weights/scope_l_256/epoch=29999.ckpt"
+noise_scale: 0.4
 max_n_residues: 256
 n_timesteps: 1000

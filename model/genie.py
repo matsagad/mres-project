@@ -2,21 +2,46 @@ from genie.config import Config
 from genie.diffusion.genie import Genie
 from genie.utils.geo_utils import compute_frenet_frames
 from genie.utils.affine_utils import T
-from model.diffusion import FrameDiffusionModel
+from model import register_diffusion_model
+from model.diffusion import DiffusionModelConfig, FrameDiffusionModel
 from protein.frames import Frames
 import torch
 from torch import Tensor
 from typing import Union
 
 
+class GenieConfig(DiffusionModelConfig):
+    f_config: str
+    f_weights: str
+    batch_size: int
+    n_timesteps: int
+    max_n_residues: int
+    noise_scale: float
+
+
+@register_diffusion_model("genie", GenieConfig)
 class GenieAdapter(FrameDiffusionModel):
-    def __init__(self, model: Genie) -> None:
+    def __init__(
+        self,
+        f_config: str,
+        f_weights: str,
+        batch_size: int,
+        n_timesteps: int,
+        max_n_residues: int,
+        noise_scale: float,
+    ) -> None:
         super().__init__()
+
+        config = Config(f_config)
+        model = Genie.load_from_checkpoint(f_weights, config=config)
+        model.eval()
+        model.model.eval()
         self.model = model
 
-        self.batch_size = 8
-        self.n_timesteps = model.config.diffusion["n_timestep"]
-        self.max_n_residues = model.config.io["max_n_res"]
+        self.batch_size = batch_size
+        self.n_timesteps = n_timesteps
+        self.max_n_residues = max_n_residues
+        self.noise_scale = noise_scale
 
         self.setup_schedule()
 
@@ -29,13 +54,6 @@ class GenieAdapter(FrameDiffusionModel):
         self._cached_score = None
 
         self.compute_unique_only = False
-
-    def from_weights_and_config(f_weights: str, f_config: str) -> "GenieAdapter":
-        config = Config(f_config)
-        model = Genie.load_from_checkpoint(f_weights, config=config)
-        model.eval()
-        model.model.eval()
-        return GenieAdapter(model)
 
     def setup_schedule(self) -> None:
         self.model.setup_schedule()
@@ -149,7 +167,6 @@ class GenieAdapter(FrameDiffusionModel):
         x_t_rots = x_t.rots
         x_t_trans = x_t.trans
         return_indices = torch.arange(x_t_rots.shape[0])
-
         if self.compute_unique_only:
             # Adapted from https://github.com/pytorch/pytorch/issues/36748
             unique, inverse = torch.unique(x_t.trans, dim=0, return_inverse=True)
