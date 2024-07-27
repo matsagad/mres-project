@@ -64,8 +64,7 @@ class ConditionalWrapper(ABC):
         raise NotImplementedError
 
     def sample(self, mask: Tensor) -> Tensor:
-        """Unconditional"""
-        NOISE_SCALE = self.model.noise_scale
+        """Sample unconditionally"""
 
         if not self.model.setup:
             self.setup_schedule()
@@ -82,7 +81,7 @@ class ConditionalWrapper(ABC):
                 disable=not self.verbose,
             ):
                 t = torch.tensor([i] * mask.shape[0], device=self.device).long()
-                x_t = self.model.reverse_diffuse(x_t, t, mask, noise_scale=NOISE_SCALE)
+                x_t = self.model.reverse_diffuse(x_t, t, mask)
                 x_trajectory.append(x_t)
 
         return x_trajectory

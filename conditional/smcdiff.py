@@ -63,7 +63,6 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
         paper: https://arxiv.org/pdf/2206.04119.pdf (Trippe et al., 2023)
         """
         N_BATCHES = self.n_batches
-        NOISE_SCALE = self.model.noise_scale
         N_TIMESTEPS = self.model.n_timesteps
         K = mask.shape[0]
         K_batch = K // N_BATCHES
@@ -166,9 +165,7 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
                 # Propose next step
                 score = self.model.score(x_t, t, mask)
                 with self.model.with_score(score):
-                    x_t = self.model.reverse_diffuse(
-                        x_t, t, mask, noise_scale=NOISE_SCALE
-                    )
+                    x_t = self.model.reverse_diffuse(x_t, t, mask)
                 x_trajectory.append(x_t)
 
         # Save traces for debugging

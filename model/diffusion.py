@@ -136,9 +136,7 @@ class FrameDiffusionModel(LightningModule, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def reverse_diffuse(
-        self, x_t: Frames, t: Tensor, mask: Tensor, noise_scale: float = 1.0
-    ) -> Frames:
+    def reverse_diffuse(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
         raise NotImplementedError
 
     @abstractmethod

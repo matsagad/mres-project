@@ -269,7 +269,9 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                 / (sigma**2 * alpha_bar_t)
             ) @ covariance_fps.T
 
-            mvn = torch.distributions.MultivariateNormal(mean_fps, covariance_fps)
+            mvn = torch.distributions.MultivariateNormal(
+                mean_fps, (self.model.noise_scale**2) * covariance_fps
+            )
 
             x_bar_t_trans = torch.empty(
                 (K, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device

@@ -124,15 +124,13 @@ class GenieAdapter(FrameDiffusionModel):
 
         return log_density
 
-    def reverse_diffuse(
-        self, x_t: Frames, t: Tensor, mask: Tensor, noise_scale: float = 1.0
-    ) -> Frames:
+    def reverse_diffuse(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
         x_t_minus_one_trans = (
             x_t.trans + self.model.betas[t].view(-1, 1, 1) * self.score(x_t, t, mask)
         ) / self.model.sqrt_alphas[t].view(-1, 1, 1)
 
         x_t_minus_one_trans += (
-            noise_scale
+            self.noise_scale
             * self.model.sqrt_betas[t].view(-1, 1, 1)
             * torch.randn(x_t_minus_one_trans.shape, device=self.device)
         )
