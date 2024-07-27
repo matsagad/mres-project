@@ -1,0 +1,3 @@
+name: 3NTN
+paths: ['./data/multi_motif_problems/3NTN.pdb']
+contig: 3NTN/A342-348{1},10-10,3NTN/A367-372{2},10-20,3NTN/B372-367{2},10-10,3NTN/B348-342{1},10-20,3NTN/C342-348{1},10-10,3NTN/C367-372{2}

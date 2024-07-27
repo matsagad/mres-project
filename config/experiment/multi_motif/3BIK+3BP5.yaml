@@ -1,0 +1,3 @@
+name: 3BIK+3BP5
+paths: ['./data/multi_motif_problems/3BIK.pdb', './data/multi_motif_problems/3BP5.pdb']
+contig: 5-15,3BIK/A121-125{1},10-20,3BP5/B110-114{2},5-15

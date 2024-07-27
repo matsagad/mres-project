@@ -1,4 +1,3 @@
-
 name: 7MRX_85
 path: ./data/motif_problems/7MRX.pdb
-contig_region: 0-63,B25-46,0-63
+contig: 0-63,B25-46,0-63

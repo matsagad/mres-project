@@ -1,0 +1,3 @@
+name: 2B5I
+paths: ['./data/multi_motif_problems/2B5I.pdb']
+contig: 5-15,2B5I/A11-23{2},10-20,2B5I/A35-45{1},10-20,2B5I/A61-72{1},5-15,2B5I/A81-95{2},20-30,2B5I/A119-133{2}

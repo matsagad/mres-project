@@ -1,4 +1,3 @@
-
 name: rsv_site4
 path: ./data/motif_problems/4ZYP.pdb
-contig_region: 10-40,A422-436,10-40
+contig: 10-40,A422-436,10-40

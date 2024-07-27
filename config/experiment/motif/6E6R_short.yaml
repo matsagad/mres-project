@@ -1,4 +1,3 @@
-
 name: 6E6R_short
 path: ./data/motif_problems/6E6R.pdb
-contig_region: 0-35,A23-35,0-35
+contig: 0-35,A23-35,0-35

@@ -1,0 +1,7 @@
+,target,contig,length,motif_paths
+0,4JHW+5WN9,"10-40,4JHW/F254-278{1},20-50,5WN9/A170-189{2},10-40",85-175,"./data/multi_motif_problems/{4JHW,5WN9}.pdb"
+1,1PRW_two,"5-20,1PRW/A16-35{1},10-25,1PRW/A52-71{1},10-30,1PRW/A89-108{2},10-25,1PRW/A125-144{2},5-20",120-200,"./data/multi_motif_problems/{1PRW}.pdb"
+2,1PRW_four,"5-20,1PRW/A21-32{1},10-25,1PRW/A57-68{2},10-25,1PRW/A94-105{3},10-25,1PRW/A125-144{4},5-20",88-163,"./data/multi_motif_problems/{1PRW}.pdb"
+3,3BIK+3BP5,"5-15,3BIK/A121-125{1},10-20,3BP5/B110-114{2},5-15",30-60,"./data/multi_motif_problems/{3BIK,3BP5}.pdb"
+4,3NTN,"3NTN/A342-348{1},10-10,3NTN/A367-372{2},10-20,3NTN/B372-367{2},10-10,3NTN/B348-342{1},10-20,3NTN/C342-348{1},10-10,3NTN/C367-372{2}",89-109,"./data/multi_motif_problems/{3NTN}.pdb"
+5,2B5I,"5-15,2B5I/A11-23{2},10-20,2B5I/A35-45{1},10-20,2B5I/A61-72{1},5-15,2B5I/A81-95{2},20-30,2B5I/A119-133{2}",116-166,"./data/multi_motif_problems/{2B5I}.pdb"

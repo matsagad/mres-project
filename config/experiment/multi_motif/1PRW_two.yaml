@@ -1,0 +1,3 @@
+name: 1PRW_two
+paths: ['./data/multi_motif_problems/1PRW.pdb']
+contig: 5-20,1PRW/A16-35{1},10-25,1PRW/A52-71{1},10-30,1PRW/A89-108{2},10-25,1PRW/A125-144{2},5-20

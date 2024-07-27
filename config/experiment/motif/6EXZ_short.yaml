@@ -1,4 +1,3 @@
-
 name: 6EXZ_short
 path: ./data/motif_problems/6EXZ.pdb
-contig_region: 0-35,A28-42,0-35
+contig: 0-35,A28-42,0-35

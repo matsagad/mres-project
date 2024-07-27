@@ -1,4 +1,3 @@
-
 name: 1PRW
 path: ./data/motif_problems/1PRW.pdb
-contig_region: 5-20,A16-35,10-25,A52-71,5-20
+contig: 5-20,A16-35,10-25,A52-71,5-20
