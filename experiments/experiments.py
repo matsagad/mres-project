@@ -6,6 +6,7 @@ import numpy as np
 from omegaconf import DictConfig
 import omegaconf
 import os
+from pathlib import Path
 import subprocess
 from timeit import Timer
 import torch
@@ -16,6 +17,7 @@ from utils.pdb import (
     atom_backbone_to_pdb,
     c_alpha_backbone_to_pdb,
     get_motif_mask,
+    split_multi_motif_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ def sample_given_motif(cfg: DictConfig) -> None:
     motif_mask, mask, masked_backbones = get_motif_mask(
         motif_backbones,
         model.max_n_residues,
-        motif_cfg.contig_region,
+        motif_cfg.contig,
         return_masked_backbones=True,
     )
     motif = masked_backbones["CA"].to(device)
@@ -86,6 +88,73 @@ def sample_given_motif(cfg: DictConfig) -> None:
             torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
 
 
+@register_experiment("sample_given_multiple_motifs")
+def sample_given_multiple_motifs(cfg: DictConfig) -> None:
+    model_cfg = cfg.model
+    device = torch.device(model_cfg.device)
+
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(device)
+
+    motif_cfg = cfg.experiment.multi_motif
+    per_group_specs = split_multi_motif_spec(motif_cfg.contig)
+
+    backbones = {}
+    for motif_path in motif_cfg.paths:
+        backbones[Path(motif_path).stem] = pdb_to_atom_backbone(motif_path)
+
+    mask = None
+    group_motifs = []
+    group_masks = []
+    for group_no, group_specs in per_group_specs.items():
+        group_motif = torch.zeros((1, model.max_n_residues, 3))
+        group_mask = torch.zeros((1, model.max_n_residues))
+
+        for motif, motif_specs in group_specs.items():
+            motif_mask, mask, masked_backbones = get_motif_mask(
+                backbones[motif],
+                model.max_n_residues,
+                motif_specs,
+                return_masked_backbones=True,
+            )
+            group_motif += masked_backbones["CA"]
+            group_mask += motif_mask
+
+        group_motif[:, group_mask[0] == 1] -= torch.mean(
+            group_motif[:, group_mask[0] == 1], dim=1, keepdim=True
+        )
+        group_motifs.append(group_motif)
+        group_masks.append(group_mask)
+
+    group_motifs = torch.cat(group_motifs).to(device)
+    group_masks = torch.cat(group_masks).to(device)
+
+    mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
+
+    cond_cfg = cfg.experiment.conditional_method
+    method = cond_cfg.method
+
+    if method not in CONDITIONAL_METHOD_REGISTRY:
+        raise Exception(
+            f"Invalid method supplied: {method}. Valid options: {', '.join(CONDITIONAL_METHOD_REGISTRY.keys())}."
+        )
+    conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
+
+    """
+    TODO: adapt current methods to multi-motif case
+    """
+
+    out = out_dir()
+    for i, backbone in enumerate(group_motifs):
+        c_alpha_backbone_to_pdb(backbone, os.path.join(out, f"motif-{i}.pdb"))
+    with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
+        f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
+
+
 @register_experiment("sample_unconditional")
 def sample_unconditional(cfg: DictConfig) -> None:
     model_cfg = cfg.model
@@ -97,12 +166,13 @@ def sample_unconditional(cfg: DictConfig) -> None:
         )
     model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
     model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model.compute_unique_only = False
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
 
     # WLOG just choose any method and call on their unconditional sample method.
-    conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["smcdiff"]
+    conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["bpf"]
     setup = conditional_method(model)
     samples = setup.sample(mask)
 
@@ -206,7 +276,7 @@ def evaluate_samples(cfg: DictConfig) -> None:
     motif_mask, _ = get_motif_mask(
         motif_backbones,
         max(sample_lengths),
-        motif_cfg.contig_region,
+        motif_cfg.contig,
         return_masked_backbones=False,
     )
 
@@ -266,7 +336,7 @@ def debug_gpu_stats(cfg: DictConfig) -> None:
     mask = torch.zeros((exp_cfg.n_samples, model.max_n_residues), device=device)
     mask[:, : model.max_n_residues] = 1
 
-    conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["smcdiff"]
+    conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["bpf"]
     setup = conditional_method(model)
     model.compute_unique_only = False
 

@@ -1,0 +1,10 @@
+defaults:
+  - conditional_method: "smcdiff"
+  - multi_motif: "4JHW+5WN9"
+
+sweep_dir: "multirun\
+  /${experiment.name}/${experiment.multi_motif.name}\
+  /K_${experiment.n_samples}/${experiment.conditional_method.name}"
+name: "sample_given_multiple_motifs"
+n_samples: 16
+keep_coords_trace: False
