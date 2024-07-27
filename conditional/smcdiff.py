@@ -133,9 +133,7 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
                 t = torch.tensor([i] * K, device=self.device).long()
 
                 if not self.particle_filter:
-                    x_t = self.model.reverse_diffuse(
-                        x_t, t, mask, noise_scale=NOISE_SCALE
-                    )
+                    x_t = self.model.reverse_diffuse(x_t, t, mask)
                     x_trajectory.append(x_t)
                     continue
 
