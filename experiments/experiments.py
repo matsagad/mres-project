@@ -66,6 +66,13 @@ def sample_given_motif(cfg: DictConfig) -> None:
             sample.trans[mask[0] == 1].detach().cpu(),
             os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
         )
+    os.makedirs(os.path.join(out, "scaffolds_unique"))
+    n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
+    for i, sample in enumerate(samples[-1][::n_per_batch]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(out, "scaffolds_unique", f"scaffold_{i}.pdb"),
+        )
 
     atom_backbone_to_pdb(
         {
