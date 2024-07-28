@@ -54,27 +54,23 @@ class LinearObservationGenerator:
         mask: Tensor,
         y_zero: Frames,
         y_mask: Tensor,
-        A: Tensor,
+        A: List[Tensor],
         x_T: Frames = None,
         recenter_y: bool = True,
     ) -> List[Tensor]:
         N_TIMESTEPS = self.model.n_timesteps
         N_COORDS_PER_RESIDUE = 3
-
-        OBSERVED_REGION = y_mask[0] == 1
         N_RESIDUES = (mask[0] == 1).sum().item()
-        N_OBSERVED = (OBSERVED_REGION).sum().item()
-        D = N_RESIDUES * N_COORDS_PER_RESIDUE
-        d = N_OBSERVED * N_COORDS_PER_RESIDUE
-        assert d == A.shape[0] and D == A.shape[1]
+        N_OBSERVATIONS = y_mask.shape[0]
 
         if self.observed_sequence_method == ObservationGenerationMethod.FORWARD:
             # Construct y sequence by forward diffusing the final observation y_0
             y_t = y_zero
             if recenter_y:
-                y_t.trans[:, y_mask[0] == 1] -= torch.mean(
-                    y_t.trans[:, y_mask[0] == 1], dim=1, keepdim=True
-                )
+                for j in range(N_OBSERVATIONS):
+                    y_t.trans[j, y_mask[j] == 1] -= torch.mean(
+                        y_t.trans[j, y_mask[j] == 1], dim=0, keepdim=True
+                    )
             y_sequence = [y_t]
             for i in tqdm(
                 range(N_TIMESTEPS),
@@ -82,38 +78,36 @@ class LinearObservationGenerator:
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
             ):
-                t = torch.tensor([i] * y_t.shape[0], device=self.device).long()
-                sqrt_alpha_t = torch.sqrt(1 - self.model.variance[t]).view(-1, 1, 1)
-                sqrt_one_minus_alpha_t = self.model.sqrt_variance[t].view(-1, 1, 1)
+                t = torch.tensor([i], device=self.device).long()
+                sqrt_alpha_t = torch.sqrt(1 - self.model.variance[t])
+                sqrt_one_minus_alpha_t = self.model.sqrt_variance[t]
 
                 y_t_trans = torch.zeros(y_t.trans.shape, device=self.device)
-                y_t_trans[:, y_mask[0] == 1] = sqrt_alpha_t * (
-                    y_t.trans[:, y_mask[0] == 1]
-                )
+                y_t_trans[y_mask == 1] = sqrt_alpha_t * y_t.trans[y_mask == 1]
 
                 if self.observed_sequence_noised:
-                    y_t_trans[
-                        :, y_mask[0] == 1
-                    ] += sqrt_one_minus_alpha_t * torch.randn(
-                        y_t_trans[:, y_mask[0] == 1].shape, device=self.device
+                    y_t_trans[y_mask == 1] += sqrt_one_minus_alpha_t * torch.randn(
+                        y_t_trans[y_mask == 1].shape, device=self.device
                     )
                 if recenter_y:
-                    y_t_trans[:, y_mask[0] == 1] -= torch.mean(
-                        y_t_trans[:, y_mask[0] == 1], dim=1, keepdim=True
-                    )
+                    for j in range(N_OBSERVATIONS):
+                        y_t_trans[j, y_mask[j] == 1] -= torch.mean(
+                            y_t_trans[j, y_mask[j] == 1], dim=0, keepdim=True
+                        )
                 y_t = self.model.coords_to_frames(y_t_trans, y_mask)
 
                 y_sequence.append(y_t)
 
-                return y_sequence
+            return y_sequence
 
         if self.observed_sequence_method == ObservationGenerationMethod.BACKWARD:
             # Construct the y sequence backwards by recursively interpolating
             # with the motif and matching the reverse-process for x
             y_T_trans = torch.zeros(y_zero.trans.shape, device=self.device)
-            y_T_trans[:, OBSERVED_REGION] = (
-                x_T.trans[:1, :N_RESIDUES].view(D) @ A.T
-            ).view(1, -1, N_COORDS_PER_RESIDUE)
+            for j in range(len(y_mask)):
+                y_T_trans[j, y_mask[j] == 1] = (
+                    x_T.trans[:1, :N_RESIDUES].flatten() @ A[j].T
+                ).view(1, -1, N_COORDS_PER_RESIDUE)
             y_T = self.model.coords_to_frames(y_T_trans, y_mask)
 
             y_t = y_T
@@ -125,7 +119,7 @@ class LinearObservationGenerator:
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
             ):
-                t = torch.tensor([i] * y_t.shape[0], device=self.device).long()
+                t = torch.tensor([i], device=self.device).long()
 
                 alpha_bar_t = 1 - self.model.forward_variance[t]
                 alpha_bar_t_minus_one = 1 - (
@@ -141,21 +135,23 @@ class LinearObservationGenerator:
                 y_t_minus_one_trans = torch.zeros(
                     y_zero.trans.shape, device=self.device
                 )
-                y_t_minus_one_trans[:, OBSERVED_REGION] = torch.sqrt(
+                y_t_minus_one_trans[y_mask == 1] = torch.sqrt(
                     alpha_bar_t_minus_one
-                ) * y_zero.trans[:, OBSERVED_REGION] + p_t * (
-                    y_t.trans[:, OBSERVED_REGION]
-                    - torch.sqrt(alpha_bar_t) * y_zero.trans[:, OBSERVED_REGION]
+                ) * y_zero.trans[y_mask == 1] + p_t * (
+                    y_t.trans[y_mask == 1]
+                    - torch.sqrt(alpha_bar_t) * y_zero.trans[y_mask == 1]
                 )
 
                 if self.observed_sequence_noised:
-                    y_t_minus_one_trans[:, OBSERVED_REGION] += q_t * (
-                        A @ torch.randn((D,), device=self.device)
-                    ).view(-1, N_COORDS_PER_RESIDUE)
+                    for j in range(N_OBSERVATIONS):
+                        y_t_minus_one_trans[j, y_mask[j] == 1] += q_t * (
+                            A[j] @ torch.randn((A[j].shape[1],), device=self.device)
+                        ).view(-1, N_COORDS_PER_RESIDUE)
                 if recenter_y:
-                    y_t_minus_one_trans[:, OBSERVED_REGION] -= torch.mean(
-                        y_t_minus_one_trans[:, OBSERVED_REGION], dim=1, keepdim=True
-                    )
+                    for j in range(N_OBSERVATIONS):
+                        y_t_minus_one_trans[j, y_mask[j] == 1] -= torch.mean(
+                            y_t_minus_one_trans[j, y_mask[j] == 1], dim=0, keepdim=True
+                        )
                 y_t_minus_one = self.model.coords_to_frames(y_t_minus_one_trans, y_mask)
 
                 y_t = y_t_minus_one

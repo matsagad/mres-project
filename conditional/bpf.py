@@ -5,12 +5,13 @@ from conditional.components.observation_generator import (
 )
 from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
+from functools import partial
 from enum import Enum
 from model.diffusion import FrameDiffusionModel
-from protein.frames import Frames
 import torch
 from torch import Tensor
 from tqdm import tqdm
+from typing import Callable, List
 from utils.resampling import get_resampling_method
 
 
@@ -67,33 +68,53 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self, mask: Tensor, motif: Tensor, motif_mask: Tensor
     ) -> Tensor:
         N_RESIDUES = (mask[0] == 1).sum().item()
-        N_MOTIF_RESIDUES = (motif_mask[0] == 1).sum().item()
         N_COORDS_PER_RESIDUE = 3
-
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
-        d = N_MOTIF_RESIDUES * N_COORDS_PER_RESIDUE
 
-        motif_indices_flat = torch.where(
-            torch.repeat_interleave(
-                motif_mask[0][:N_RESIDUES] == 1, N_COORDS_PER_RESIDUE
-            )
-        )[0]
-        A = torch.zeros((d, D), device=self.device)
-        A[range(d), motif_indices_flat] = 1
+        A = []
+        if self.conditional_method == BPFMethod.NOISED_TARGETS:
+            for i in range(len(motif_mask)):
+                n_motif_residues = (motif_mask[i] == 1).sum().item()
+                d = n_motif_residues * N_COORDS_PER_RESIDUE
+
+                motif_indices_flat = torch.where(
+                    torch.repeat_interleave(
+                        motif_mask[i, :N_RESIDUES] == 1, N_COORDS_PER_RESIDUE
+                    )
+                )[0]
+                A_motif = torch.zeros((d, D), device=self.device)
+                A_motif[range(d), motif_indices_flat] = 1
+                A.append(A_motif)
+
+        log_likelihood = self.get_log_likelihood(self.likelihood_method)
+
+        if self.likelihood_method == LikelihoodMethod.MATRIX:
+            log_likelihood = partial(log_likelihood, A=A)
 
         return self.sample_conditional(
-            mask, motif, motif_mask, A, recenter_y=True, recenter_x=True
+            mask, motif, motif_mask, A, log_likelihood, recenter_y=True, recenter_x=True
         )
 
     def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
-        raise NotImplementedError("")
+        A, y, y_mask = self._get_symmetric_constraints(mask, symmetry)
+
+        assert self.likelihood_method == LikelihoodMethod.MATRIX, (
+            f"Likelihood method '{self.likelihood_method}' is not supported for sampling symmetry."
+            f" Make sure to set experiment.conditional_method.likelihood_method='{LikelihoodMethod.MATRIX}'"
+        )
+        log_likelihood = partial(self.get_log_likelihood(self.likelihood_method), A=[A])
+
+        return self.sample_conditional(
+            mask, y, y_mask, [A], log_likelihood, recenter_y=False, recenter_x=True
+        )
 
     def sample_conditional(
         self,
         mask: Tensor,
-        y: Frames,
+        y: Tensor,
         y_mask: Tensor,
-        A: Tensor,
+        A: List[Tensor],
+        log_likelihood: Callable,
         recenter_y: bool = True,
         recenter_x: bool = True,
     ) -> Tensor:
@@ -102,27 +123,22 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         """
         N_BATCHES = self.n_batches
         N_TIMESTEPS = self.model.n_timesteps
-        N_COORDS_PER_RESIDUE = 3
+        N_MOTIFS = y_mask.shape[0]
         K, MAX_N_RESIDUES = mask.shape
         K_batch = K // N_BATCHES
         assert (
             K % N_BATCHES == 0
         ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
 
-        OBSERVED_REGION = y_mask[0] == 1
+        OBSERVED_REGION = torch.sum(y_mask, dim=0) == 1
         N_RESIDUES = (mask[0] == 1).sum().item()
-        N_OBSERVED = (OBSERVED_REGION).sum().item()
-        D = N_RESIDUES * N_COORDS_PER_RESIDUE
-        d = N_OBSERVED * N_COORDS_PER_RESIDUE
-        assert d == A.shape[0] and D == A.shape[1]
 
         # (1) Setup likelihood measure and sequence {y_t}
-        y_zero = self.model.coords_to_frames(
-            y.view(1, -1, N_COORDS_PER_RESIDUE), y_mask
-        )
-        y_zero.trans -= torch.mean(
-            y_zero.trans[:, OBSERVED_REGION], dim=1, keepdim=True
-        )
+        y_zero = self.model.coords_to_frames(y, y_mask)
+        for j in range(N_MOTIFS):
+            y_zero.trans[j, y_mask[j] == 1] -= torch.mean(
+                y_zero.trans[j, y_mask[j] == 1], dim=0, keepdim=True
+            )
         if self.conditional_method == BPFMethod.NOISED_TARGETS:
             if self.observed_sequence_method == ObservationGenerationMethod.BACKWARD:
                 # Use noise-sharing for backwards generation case
@@ -138,7 +154,6 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         else:
             x_T = self.model.sample_frames(mask)
             y_sequence = []
-        log_likelihood = self.get_log_likelihood(self.likelihood_method)
 
         w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
         ess = torch.zeros(N_BATCHES, device=self.device)
@@ -177,10 +192,13 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             alpha_bar_t = 1 - self.model.forward_variance[t[0]]
             if self.conditional_method == BPFMethod.NOISED_TARGETS:
                 variance_t = alpha_bar_t * self.likelihood_sigma**2
-                log_w = log_likelihood(x_bar_t, y_sequence[t[0]], y_mask, variance_t)
+                llik_x_t = x_bar_t
+                llik_y_t = y_sequence[t[0]]
             elif self.conditional_method == BPFMethod.PROJECTION:
                 variance_t = 1 - alpha_bar_t + self.likelihood_sigma**2
-                log_w = log_likelihood(x_zero_hat, y_zero, y_mask, variance_t)
+                llik_x_t = x_zero_hat
+                llik_y_t = y_zero
+            log_w = log_likelihood(llik_x_t, llik_y_t, y_mask, variance_t)
 
             log_w = log_w.view(N_BATCHES, K_batch)
             log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)

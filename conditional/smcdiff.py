@@ -65,13 +65,14 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
         N_BATCHES = self.n_batches
         N_TIMESTEPS = self.model.n_timesteps
         K = mask.shape[0]
+        N_MOTIFS = motif_mask.shape[0]
         K_batch = K // N_BATCHES
         assert (
             K % N_BATCHES == 0
         ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
 
         # (1) Forward diffuse motif
-        MOTIF_SEGMENT = motif_mask[0] == 1
+        OBSERVED_REGION = torch.sum(motif_mask, dim=0) == 1
         x_motif = self.model.coords_to_frames(motif, motif_mask)
 
         motif_trajectory = [x_motif]
@@ -90,9 +91,10 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
             t = torch.tensor([i] * motif_mask.shape[0], device=self.device).long()
             x_motif = forward_diffuse(x_motif, t, motif_mask)
             # Keep motif zero-centred
-            x_motif.trans[:, motif_mask[0] == 1] -= torch.mean(
-                x_motif.trans[:, motif_mask[0] == 1], dim=1, keepdim=True
-            )
+            for j in range(N_MOTIFS):
+                x_motif.trans[j, motif_mask[j] == 1] -= torch.mean(
+                    x_motif.trans[j, motif_mask[j] == 1], dim=0, keepdim=True
+                )
             motif_trajectory.append(x_motif)
 
         logger.info("Collected noised motifs at all time steps.")
@@ -101,7 +103,7 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
         x_T = self.model.sample_frames(mask)
         x_trajectory = [x_T]
         x_t = x_T
-        _gamma = self.replacement_weight
+        gamma = self.replacement_weight
 
         if self.particle_filter:
             pf_stats = {"ess": [], "w": []}
@@ -118,19 +120,28 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
             ):
-                # Keep motif segment of protein zero-centred
+                t = torch.tensor([i] * K, device=self.device).long()
+
+                # Keep motif segment of protein zero-centred for visuals
                 x_t.trans[:, mask[0] == 1] -= torch.mean(
-                    x_t.trans[:, MOTIF_SEGMENT], dim=1
+                    x_t.trans[:, OBSERVED_REGION], dim=1
                 ).unsqueeze(1)
 
                 # Replace motif
                 ## Index by i + 1 since ts_motifs[(T - 1) + 1] is x_{M}^{T}
-                x_t.trans[:, MOTIF_SEGMENT] = (1 - _gamma) * x_t.trans[
-                    :, MOTIF_SEGMENT
-                ] + _gamma * motif_trajectory[i + 1].trans[:, MOTIF_SEGMENT]
-                x_t = self.model.coords_to_frames(x_t.trans, mask)
+                for j in range(N_MOTIFS):
+                    ## Position motif to the same centre of mass as the motif region
+                    com_offset = torch.mean(
+                        x_t.trans[:, motif_mask[j] == 1], dim=1
+                    ).unsqueeze(1)
 
-                t = torch.tensor([i] * K, device=self.device).long()
+                    x_t.trans[:, motif_mask[j] == 1] = (1 - gamma) * (
+                        x_t.trans[:, motif_mask[j] == 1]
+                    ) + gamma * (
+                        motif_trajectory[t[0] + 1].trans[j : j + 1, motif_mask[j] == 1]
+                        + com_offset
+                    )
+                x_t = self.model.coords_to_frames(x_t.trans, mask)
 
                 if not self.particle_filter:
                     x_t = self.model.reverse_diffuse(x_t, t, mask)
@@ -140,9 +151,19 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
                 # Re-weight based on motif at t-1
                 ## Find likelihood of getting motif when de-noised
                 with self.model.with_score(score):
-                    log_w = self.model.reverse_log_likelihood(
-                        motif_trajectory[i], x_t, t, motif_mask, mask
-                    ).view(N_BATCHES, K_batch)
+                    log_w = 0
+                    for j in range(N_MOTIFS):
+                        x_motif_j = self.model.coords_to_frames(
+                            motif_trajectory[i].trans[j : j + 1],
+                            motif_mask[j : j + 1],
+                        )
+                        log_w += self.model.reverse_log_likelihood(
+                            x_motif_j,
+                            x_t,
+                            t,
+                            motif_mask,
+                            mask,
+                        ).view(N_BATCHES, K_batch)
                 log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
 
                 w *= torch.exp(log_w - log_sum_w)

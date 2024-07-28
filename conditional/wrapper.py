@@ -4,7 +4,7 @@ import os
 from torch import Tensor
 import torch
 import tqdm
-from typing import Dict
+from typing import Dict, Tuple
 from utils.path import out_dir
 from utils.registry import ConfigOutline
 
@@ -62,6 +62,104 @@ class ConditionalWrapper(ABC):
     def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
         """Sample conditioned on point symmetry"""
         raise NotImplementedError
+
+    def _general_3d_rot_matrix(self, thetas: Tensor, axis: Tensor) -> Tensor:
+        assert len(axis) == 3
+        u = axis / (axis**2).sum()
+        u_x, u_y, u_z = u
+
+        _cos = torch.cos(thetas)
+        _sin = torch.sin(thetas)
+
+        R = torch.empty((len(thetas), 3, 3))
+        R[:, 0] = torch.stack(
+            [
+                _cos + (u_x**2) * (1 - _cos),
+                u_x * u_y * (1 - _cos) - u_z * _sin,
+                u_x * u_z * (1 - _cos) + u_y * _sin,
+            ]
+        ).T
+        R[:, 1] = torch.stack(
+            [
+                u_y * u_x * (1 - _cos) + u_z * _sin,
+                _cos + (u_y**2) * (1 - _cos),
+                u_y * u_z * (1 - _cos) - u_x * _sin,
+            ]
+        ).T
+        R[:, 2] = torch.stack(
+            [
+                u_z * u_x * (1 - _cos) - u_y * _sin,
+                u_z * u_y * (1 - _cos) + u_x * _sin,
+                _cos + (u_z**2) * (1 - _cos),
+            ]
+        ).T
+
+        return R
+
+    def _get_symmetric_constraints(
+        self, mask: Tensor, symmetry: str
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        N_RESIDUES = (mask[0] == 1).sum().item()
+        N_COORDS_PER_RESIDUE = 3
+        x_axis, y_axis, z_axis = torch.eye(3)
+
+        d = None
+        D = N_RESIDUES * N_COORDS_PER_RESIDUE
+        SYM_GROUP_DELIM = "-"
+        symmetry_group = symmetry.split(SYM_GROUP_DELIM)[0]
+
+        if symmetry_group == "S":
+            # Cyclic symmetry S-n
+            N_SYMMETRIES = int(symmetry.split(SYM_GROUP_DELIM)[-1])
+            N_RESIDUES_PER_DOMAIN = N_RESIDUES // N_SYMMETRIES
+            N_FIXED_RESIDUES = N_RESIDUES_PER_DOMAIN * N_SYMMETRIES
+
+            d = N_FIXED_RESIDUES * N_COORDS_PER_RESIDUE
+
+            thetas = 2 * torch.pi * torch.arange(N_SYMMETRIES).float() / N_SYMMETRIES
+            R_z = self._general_3d_rot_matrix(thetas, z_axis)
+            F = R_z
+
+        elif symmetry_group == "D":
+            # Dihedral symmetry D-n
+            N_SYMMETRIES = 2 * int(symmetry.split(SYM_GROUP_DELIM)[-1])
+            N_RESIDUES_PER_DOMAIN = N_RESIDUES // N_SYMMETRIES
+            N_FIXED_RESIDUES = N_RESIDUES_PER_DOMAIN * N_SYMMETRIES
+
+            d = N_FIXED_RESIDUES * N_COORDS_PER_RESIDUE
+
+            thetas = (
+                2
+                * torch.pi
+                * torch.arange(N_SYMMETRIES // 2).float()
+                / (N_SYMMETRIES // 2)
+            )
+            R_x_pi = self._general_3d_rot_matrix(torch.tensor([torch.pi]), x_axis)
+            R_z = self._general_3d_rot_matrix(thetas, z_axis)
+            S = torch.einsum("sij,tjk->tik", R_x_pi, R_z)
+            F = torch.concatenate((R_z, S))
+
+        assert d is not None, f"Unsupported symmetry group chosen: {symmetry_group}"
+
+        F = F.to(self.device)
+        A = torch.zeros((d, D), device=self.device)
+        NCPR = N_COORDS_PER_RESIDUE
+        for k, F_k in enumerate(F):
+            offset = NCPR * N_RESIDUES_PER_DOMAIN * k
+            for i in range(N_RESIDUES_PER_DOMAIN):
+                A[
+                    offset + NCPR * i : offset + NCPR * (i + 1),
+                    NCPR * i : NCPR * (i + 1),
+                ] = F_k
+
+        assert d <= D
+        A[range(d), range(d)] -= 1
+
+        y_mask = torch.zeros((1, N_RESIDUES), device=self.device)
+        y_mask[:, :N_FIXED_RESIDUES] = 1
+        y = torch.zeros((1, N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
+
+        return A, y, y_mask
 
     def sample(self, mask: Tensor) -> Tensor:
         """Sample unconditionally"""

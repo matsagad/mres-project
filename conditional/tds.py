@@ -1,10 +1,12 @@
 from conditional import register_conditional_method
 from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
+from functools import partial
 from model.diffusion import FrameDiffusionModel
 import torch
 from torch import Tensor
 from tqdm import tqdm
+from typing import Callable
 from utils.resampling import get_resampling_method
 
 
@@ -48,6 +50,50 @@ class TDS(ConditionalWrapper, ParticleFilter):
     def sample_given_motif(
         self, mask: Tensor, motif: Tensor, motif_mask: Tensor
     ) -> Tensor:
+        N_RESIDUES = (mask[0] == 1).sum().item()
+        N_COORDS_PER_RESIDUE = 3
+        D = N_RESIDUES * N_COORDS_PER_RESIDUE
+
+        log_likelihood = self.get_log_likelihood(self.likelihood_method)
+        if self.likelihood_method == LikelihoodMethod.MATRIX:
+            A = []
+            for i in range(len(motif_mask)):
+                n_motif_residues = (motif_mask[i] == 1).sum().item()
+                d = n_motif_residues * N_COORDS_PER_RESIDUE
+
+                motif_indices_flat = torch.where(
+                    torch.repeat_interleave(
+                        motif_mask[i, :N_RESIDUES] == 1, N_COORDS_PER_RESIDUE
+                    )
+                )[0]
+                A_motif = torch.zeros((d, D), device=self.device)
+                A_motif[range(d), motif_indices_flat] = 1
+                A.append(A_motif)
+            log_likelihood = partial(log_likelihood, A=A)
+
+        return self.sample_conditional(
+            mask, motif, motif_mask, log_likelihood, recenter_x=True
+        )
+
+    def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
+        A, y, y_mask = self._get_symmetric_constraints(mask, symmetry)
+
+        assert self.likelihood_method == LikelihoodMethod.MATRIX, (
+            f"Likelihood method '{self.likelihood_method}' is not supported for sampling symmetry."
+            f" Make sure to set experiment.conditional_method.likelihood_method='{LikelihoodMethod.MATRIX}'"
+        )
+        log_likelihood = partial(self.get_log_likelihood(self.likelihood_method), A=[A])
+
+        return self.sample_conditional(mask, y, y_mask, log_likelihood, recenter_x=True)
+
+    def sample_conditional(
+        self,
+        mask: Tensor,
+        y: Tensor,
+        y_mask: Tensor,
+        log_likelihood: Callable,
+        recenter_x: bool = True,
+    ) -> Tensor:
         """
         Twisted Diffusion Sampler (for fixed motif inpainting) as defined
         in the paper: https://arxiv.org/pdf/2306.17775 (Wu et al., 2023)
@@ -59,13 +105,11 @@ class TDS(ConditionalWrapper, ParticleFilter):
         assert (
             K % N_BATCHES == 0
         ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
-        OBSERVED_REGION = motif_mask[0] == 1
+        OBSERVED_REGION = torch.sum(y_mask, dim=0) == 1
         twist_scale = self.twist_scale
 
         # Set-up motif
-        y_mask = motif_mask
-        y_zero = self.model.coords_to_frames(motif, motif_mask)
-        log_likelihood = self.get_log_likelihood(self.likelihood_method)
+        y_zero = self.model.coords_to_frames(y, y_mask)
 
         # Sample frames
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
@@ -118,9 +162,10 @@ class TDS(ConditionalWrapper, ParticleFilter):
 
                 ## Recenter with respect to motif segment's center-of-mass
                 ## (This is not necessary but makes for easier visual comparison when plotted)
-                x_t.trans[:, :N_RESIDUES] -= torch.mean(
-                    x_t.trans[:, OBSERVED_REGION], dim=1
-                ).unsqueeze(1)
+                if recenter_x:
+                    x_t.trans[:, :N_RESIDUES] -= torch.mean(
+                        x_t.trans[:, OBSERVED_REGION], dim=1
+                    ).unsqueeze(1)
 
                 t = torch.tensor([i] * K, device=self.device).long()
 
@@ -166,7 +211,6 @@ class TDS(ConditionalWrapper, ParticleFilter):
                     reverse_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
                     )
-
                 with self.model.with_score(cond_score):
                     reverse_cond_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
@@ -192,6 +236,3 @@ class TDS(ConditionalWrapper, ParticleFilter):
         self.save_stats(pf_stats)
 
         return x_trajectory
-
-    def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
-        raise NotImplementedError("")

@@ -115,30 +115,36 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
         backbones[Path(motif_path).stem] = pdb_to_atom_backbone(motif_path)
 
     mask = None
-    group_motifs = []
-    group_masks = []
+    motifs = []
+    motif_masks = []
     for group_no, group_specs in per_group_specs.items():
         group_motif = torch.zeros((1, model.max_n_residues, 3))
-        group_mask = torch.zeros((1, model.max_n_residues))
+        group_motif_mask = torch.zeros((1, model.max_n_residues))
 
-        for motif, motif_specs in group_specs.items():
+        for motif_name, motif_specs in group_specs.items():
             motif_mask, mask, masked_backbones = get_motif_mask(
-                backbones[motif],
+                backbones[motif_name],
                 model.max_n_residues,
                 motif_specs,
                 return_masked_backbones=True,
             )
             group_motif += masked_backbones["CA"]
-            group_mask += motif_mask
+            group_motif_mask += motif_mask
 
-        group_motif[:, group_mask[0] == 1] -= torch.mean(
-            group_motif[:, group_mask[0] == 1], dim=1, keepdim=True
+        # Make motif zero-centred. This assumes each motif group is composed
+        # of segments from only one protein. Otherwise, their centre of masses
+        # will be inconsistent with each other.
+        group_motif[:, group_motif_mask[0] == 1] -= torch.mean(
+            group_motif[:, group_motif_mask[0] == 1], dim=1, keepdim=True
         )
-        group_motifs.append(group_motif)
-        group_masks.append(group_mask)
+        motifs.append(group_motif)
+        motif_masks.append(group_motif_mask)
 
-    group_motifs = torch.cat(group_motifs).to(device)
-    group_masks = torch.cat(group_masks).to(device)
+    motifs = torch.cat(motifs).to(device)
+    motif_masks = torch.cat(motif_masks).to(device)
+    assert torch.all(
+        torch.sum(motif_masks, dim=0) <= 1
+    ), "Motif masks should not be intersecting."
 
     mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
 
@@ -151,13 +157,28 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
         )
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
-    """
-    TODO: adapt current methods to multi-motif case
-    """
+    setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
+    samples = setup.sample_given_motif(mask, motifs, motif_masks)
 
     out = out_dir()
-    for i, backbone in enumerate(group_motifs):
-        c_alpha_backbone_to_pdb(backbone, os.path.join(out, f"motif-{i}.pdb"))
+    os.makedirs(os.path.join(out, "scaffolds"))
+    for i, sample in enumerate(samples[-1]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
+        )
+    os.makedirs(os.path.join(out, "scaffolds_unique"))
+    n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
+    for i, sample in enumerate(samples[-1][::n_per_batch]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(out, "scaffolds_unique", f"scaffold_{i}.pdb"),
+        )
+    os.makedirs(os.path.join(out, "motifs"))
+    for i, backbone in enumerate(motifs):
+        c_alpha_backbone_to_pdb(
+            backbone[motif_masks[i] == 1], os.path.join(out, "motifs", f"motif_{i}.pdb")
+        )
     with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
         f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
 
