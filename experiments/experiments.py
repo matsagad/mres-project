@@ -321,7 +321,7 @@ def evaluate_samples(cfg: DictConfig) -> None:
         )
     np.savetxt(
         os.path.join(path_to_masks, "motif.npy"),
-        motif_backbones["CA"],
+        motif_backbones["A"]["CA"],
         fmt="%.3f",
         delimiter=",",
     )

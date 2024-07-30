@@ -47,8 +47,8 @@ def pdb_to_atom_backbone(
     return backbones
 
 
-def pdb_to_c_alpha_backbone(f_pdb: str) -> Tensor:
-    return pdb_to_atom_backbone(f_pdb)["CA"]
+def pdb_to_c_alpha_backbone(f_pdb: str, chain: str="A") -> Tensor:
+    return pdb_to_atom_backbone(f_pdb)[chain]["CA"]
 
 
 def atom_backbone_to_pdb(
