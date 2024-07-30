@@ -41,7 +41,10 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self.supports_condition_on_motif = True
         self.supports_condition_on_symmetry = False
 
-        self.model.compute_unique_only = True
+        # Order of operations need to be changed for this optimisation
+        # to work, but the two methods require differing orderings.
+        # Keep this false instead to maintain readability.
+        self.model.compute_unique_only = False
 
     def with_config(
         self,
@@ -155,68 +158,84 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             x_T = self.model.sample_frames(mask)
             y_sequence = []
 
-        w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
-        ess = torch.zeros(N_BATCHES, device=self.device)
-        pf_stats = {"ess": [], "w": []}
-
         # (2) Generate sequence {x_t}
         x_sequence = [x_T]
         x_t = x_T
 
-        for i in tqdm(
-            reversed(range(N_TIMESTEPS)),
-            desc="Generating {x_t}",
-            total=N_TIMESTEPS,
-            disable=not self.verbose,
-        ):
-            t = torch.tensor([i] * K, device=self.device).long()
+        w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
+        ess = torch.zeros(N_BATCHES, device=self.device)
+        pf_stats = {"ess": [], "w": []}
+        FINAL_TIME_STEP = 0
 
-            with torch.no_grad():
-                score = self.model.score(x_t, t, mask)
-            with self.model.with_score(score):
-                x_zero_hat = self.model.predict_fully_denoised(x_t, t, mask)
-                x_bar_t = self.model.reverse_diffuse(x_t, t, mask)
+        with torch.no_grad():
+            ## Compute score to be used in the first iteration
+            T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
+            score_T = self.model.score(x_T, T, mask)
+            score_t = score_T
 
-            if recenter_x:
-                # Translate mean so that motif segment is centred at zero
-                x_bar_t.trans[:, :N_RESIDUES] -= torch.mean(
-                    x_bar_t.trans[:, OBSERVED_REGION], dim=1
-                ).unsqueeze(1)
+            for i in tqdm(
+                reversed(range(N_TIMESTEPS)),
+                desc="Generating {x_t}",
+                total=N_TIMESTEPS,
+                disable=not self.verbose,
+            ):
+                t = torch.tensor([i] * K, device=self.device).long()
 
-            if not self.particle_filter:
-                x_t = x_bar_t
-                x_sequence.append(x_t)
-                continue
+                # Propose next step
+                with self.model.with_score(score_t):
+                    x_t_minus_one = self.model.reverse_diffuse(x_t, t, mask)
 
-            # Resample particles
-            alpha_bar_t = 1 - self.model.forward_variance[t[0]]
-            if self.conditional_method == BPFMethod.NOISED_TARGETS:
-                variance_t = alpha_bar_t * self.likelihood_sigma**2
-                llik_x_t = x_bar_t
-                llik_y_t = y_sequence[t[0]]
-            elif self.conditional_method == BPFMethod.PROJECTION:
-                variance_t = 1 - alpha_bar_t + self.likelihood_sigma**2
-                llik_x_t = x_zero_hat
-                llik_y_t = y_zero
-            log_w = log_likelihood(llik_x_t, llik_y_t, y_mask, variance_t)
+                ## Translate mean so that motif segment is centred at zero
+                if recenter_x:
+                    x_t_minus_one.trans[:, :N_RESIDUES] -= torch.mean(
+                        x_t_minus_one.trans[:, OBSERVED_REGION], dim=1
+                    ).unsqueeze(1)
+                x_sequence.append(x_t_minus_one)
+                if i == FINAL_TIME_STEP:
+                    continue
 
-            log_w = log_w.view(N_BATCHES, K_batch)
-            log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
-            w *= torch.exp(log_w - log_sum_w)
-            all_zeros = torch.all(w == 0, dim=1)
+                ## Compute score to be used in next iteration
+                t_minus_one = t - 1
+                score_t_minus_one = self.model.score(x_t_minus_one, t_minus_one, mask)
 
-            w[all_zeros] = 1 / K_batch
-            ess[all_zeros] = 0
-            w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
-            ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
+                if not self.particle_filter:
+                    x_t = x_t_minus_one
+                    score_t = score_t_minus_one
+                    continue
 
-            pf_stats["ess"].append(ess)
-            pf_stats["w"].append(w.cpu())
+                # Resample particles
+                ## Compute log likelihood
+                alpha_bar_t = 1 - self.model.forward_variance[t[0]]
+                if self.conditional_method == BPFMethod.NOISED_TARGETS:
+                    variance_t = alpha_bar_t * self.likelihood_sigma**2
+                    llik_x_t = x_t_minus_one
+                    llik_y_t = y_sequence[t[0]]
+                elif self.conditional_method == BPFMethod.PROJECTION:
+                    variance_t = 1 - alpha_bar_t + self.likelihood_sigma**2
+                    with self.model.with_score(score_t_minus_one):
+                        x_zero_hat = self.model.predict_fully_denoised(
+                            x_t_minus_one, t_minus_one, mask
+                        )
+                    llik_x_t = x_zero_hat
+                    llik_y_t = y_zero
+                log_w = log_likelihood(llik_x_t, llik_y_t, y_mask, variance_t)
 
-            x_t = x_bar_t
-            self.resample(w, ess, [x_t.rots, x_t.trans])
+                log_w = log_w.view(N_BATCHES, K_batch)
+                log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
+                w *= torch.exp(log_w - log_sum_w)
+                all_zeros = torch.all(w == 0, dim=1)
 
-            x_sequence.append(x_t)
+                w[all_zeros] = 1 / K_batch
+                ess[all_zeros] = 0
+                w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
+                ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
+
+                pf_stats["w"].append(w.cpu())
+                pf_stats["ess"].append(ess.cpu())
+
+                x_t = x_t_minus_one
+                score_t = score_t_minus_one
+                self.resample(w, ess, [x_t.rots, x_t.trans, score_t])
 
         if self.particle_filter:
             self.save_stats(pf_stats)
