@@ -8,6 +8,7 @@ from protein.frames import Frames
 import torch
 from torch import Tensor
 from typing import Union
+from utils.resampling import get_unique_and_inverse
 
 
 class GenieConfig(DiffusionModelConfig):
@@ -166,14 +167,9 @@ class GenieAdapter(FrameDiffusionModel):
         x_t_trans = x_t.trans
         return_indices = torch.arange(x_t_rots.shape[0])
         if self.compute_unique_only:
-            # Adapted from https://github.com/pytorch/pytorch/issues/36748
-            unique, inverse = torch.unique(x_t.trans, dim=0, return_inverse=True)
-            perm = torch.arange(inverse.shape[0], device=inverse.device)
-            unique_indices = inverse.new_empty(unique.shape[0]).scatter_(
-                0, inverse, perm
-            )
-            x_t_rots = x_t_rots[unique_indices]
-            x_t_trans = x_t_trans[unique_indices]
+            unique, inverse = get_unique_and_inverse(x_t.trans)
+            x_t_rots = x_t_rots[unique]
+            x_t_trans = x_t_trans[unique]
             return_indices = inverse
 
         denoised_pile = []
@@ -191,12 +187,12 @@ class GenieAdapter(FrameDiffusionModel):
     def predict_fully_denoised(self, x_t: Frames, t: Tensor, mask: Tensor) -> Frames:
         epsilon = self._epsilon(x_t, t, mask)
 
-        x_0_trans = (
+        x_zero_trans = (
             x_t.trans
             - self.model.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1) * epsilon
         ) / self.model.sqrt_alphas_cumprod[t].view(-1, 1, 1)
 
-        return self.coords_to_frames(x_0_trans, mask)
+        return self.coords_to_frames(x_zero_trans, mask)
 
     def reverse_log_likelihood(
         self,

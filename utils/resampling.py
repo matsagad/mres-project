@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Callable
+from typing import Callable, Tuple
 
 """
 Resampling methods for particle filtering.
@@ -99,3 +99,11 @@ def systematic_resample(w: Tensor) -> Tensor:
     if squeeze:
         return indices.squeeze(0)
     return indices
+
+
+def get_unique_and_inverse(x: Tensor) -> Tuple[Tensor, Tensor]:
+    # Adapted from https://github.com/pytorch/pytorch/issues/36748
+    unique_values, inverse = torch.unique(x, dim=0, return_inverse=True)
+    perm = torch.arange(inverse.shape[0], device=inverse.device)
+    unique = inverse.new_empty(unique_values.shape[0]).scatter_(0, inverse, perm)
+    return unique, inverse
