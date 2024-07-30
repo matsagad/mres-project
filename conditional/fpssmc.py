@@ -131,109 +131,115 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             mask, y_zero, y_mask, A, x_T, recenter_y=recenter_y
         )
 
+        # (2) Generate sequence {x_t}
+        x_sequence = [x_T]
+        x_t = x_T
+
+        log_likelihood = self.get_log_likelihood(LikelihoodMethod.MATRIX)
         w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
         ess = torch.zeros(N_BATCHES, device=self.device)
         pf_stats = {"ess": [], "w": []}
+        FINAL_TIME_STEP = 0
 
-        # (2) Generate sequence {x_t}
-        log_likelihood = self.get_log_likelihood(LikelihoodMethod.MATRIX)
-
-        x_sequence = [x_T]
-        x_t = x_T
         A_cat = torch.cat(A, dim=0)
         A_T_A = A_cat.T @ A_cat
 
-        for i in tqdm(
-            reversed(range(N_TIMESTEPS)),
-            desc="Generating {x_t}",
-            total=N_TIMESTEPS,
-            disable=not self.verbose,
-        ):
-            t = torch.tensor([i] * K, device=self.device).long()
+        with torch.no_grad():
+            for i in tqdm(
+                reversed(range(N_TIMESTEPS)),
+                desc="Generating {x_t}",
+                total=N_TIMESTEPS,
+                disable=not self.verbose,
+            ):
+                t = torch.tensor([i] * K, device=self.device).long()
 
-            alpha_bar_t = 1 - self.model.forward_variance[t[:1]]
+                alpha_bar_t = 1 - self.model.forward_variance[t[:1]]
 
-            # Propose next step
-            covariance_inverse = torch.zeros((D, D), device=self.device)
-            covariance_inverse[range(D), range(D)] = 1 / self.model.variance[t[:1]]
+                # Propose next step
+                covariance_inverse = torch.zeros((D, D), device=self.device)
+                covariance_inverse[range(D), range(D)] = 1 / self.model.variance[t[:1]]
 
-            with torch.no_grad():
-                score = self.model.score(x_t, t, mask)
-            with self.model.with_score(score):
-                mean = self.model.reverse_diffuse_deterministic(x_t, t, mask)
-            if recenter_x:
-                # Translate mean so that motif segment is centred at zero
-                mean.trans[:, :N_RESIDUES] -= torch.mean(
-                    mean.trans[:, OBSERVED_REGION], dim=1
-                ).unsqueeze(1)
+                score_t = self.model.score(x_t, t, mask)
+                with self.model.with_score(score_t):
+                    mean = self.model.reverse_diffuse_deterministic(x_t, t, mask)
+                if recenter_x:
+                    # Translate mean so that motif segment is centred at zero
+                    mean.trans[:, :N_RESIDUES] -= torch.mean(
+                        mean.trans[:, OBSERVED_REGION], dim=1
+                    ).unsqueeze(1)
 
-            covariance_fps_inverse = covariance_inverse + A_T_A / (
-                sigma**2 * alpha_bar_t
-            )
-            covariance_fps = torch.inverse(covariance_fps_inverse)
-
-            A_T_y = 0
-            for j in range(len(y_mask)):
-                d = torch.sum(y_mask[j] == 1) * N_COORDS_PER_RESIDUE
-                com_offset = torch.mean(
-                    mean.trans[:, y_mask[j] == 1], dim=1, keepdim=True
+                covariance_fps_inverse = covariance_inverse + A_T_A / (
+                    sigma**2 * alpha_bar_t
                 )
-                A_T_y += (
-                    y_sequence[t[0]].trans[j : j + 1, y_mask[j] == 1] + com_offset
-                ).view(-1, d) @ A[j]
+                covariance_fps = torch.inverse(covariance_fps_inverse)
 
-            mean_fps = (
-                mean.trans[:, :N_RESIDUES].view(-1, D) @ covariance_inverse.T
-                + A_T_y / (sigma**2 * alpha_bar_t)
-            ) @ covariance_fps.T
+                A_T_y = 0
+                for j in range(len(y_mask)):
+                    d = torch.sum(y_mask[j] == 1) * N_COORDS_PER_RESIDUE
+                    com_offset = torch.mean(
+                        mean.trans[:, y_mask[j] == 1], dim=1, keepdim=True
+                    )
+                    A_T_y += (
+                        y_sequence[t[0]].trans[j : j + 1, y_mask[j] == 1] + com_offset
+                    ).view(-1, d) @ A[j]
 
-            mvn = torch.distributions.MultivariateNormal(
-                mean_fps, (self.model.noise_scale**2) * covariance_fps
-            )
+                mean_fps = (
+                    mean.trans[:, :N_RESIDUES].view(-1, D) @ covariance_inverse.T
+                    + A_T_y / (sigma**2 * alpha_bar_t)
+                ) @ covariance_fps.T
 
-            x_bar_t_trans = torch.empty(
-                (K, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device
-            )
-            x_bar_t_trans[:, N_RESIDUES:] = 0
-            x_bar_t_trans[:, :N_RESIDUES] = mvn.sample((1,)).view(
-                K, N_RESIDUES, N_COORDS_PER_RESIDUE
-            )
-            x_bar_t = self.model.coords_to_frames(x_bar_t_trans, mask)
+                mvn = torch.distributions.MultivariateNormal(
+                    mean_fps, (self.model.noise_scale**2) * covariance_fps
+                )
 
-            if not self.particle_filter:
+                x_bar_t_trans = torch.empty(
+                    (K, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device
+                )
+                x_bar_t_trans[:, N_RESIDUES:] = 0
+                x_bar_t_trans[:, :N_RESIDUES] = mvn.sample((1,)).view(
+                    K, N_RESIDUES, N_COORDS_PER_RESIDUE
+                )
+                x_bar_t = self.model.coords_to_frames(x_bar_t_trans, mask)
+                x_sequence.append(x_bar_t)
+                if i == FINAL_TIME_STEP:
+                    continue
+                if not self.particle_filter:
+                    x_t = x_bar_t
+                    continue
+
+                # Resample particles
+                with self.model.with_score(score_t):
+                    reverse_llik = self.model.reverse_log_likelihood(
+                        x_bar_t, x_t, t, mask, mask
+                    )
+                reverse_cond_llik = mvn.log_prob(
+                    x_bar_t.trans[:, :N_RESIDUES].view(-1, D)
+                )
+
+                variance_t = alpha_bar_t * self.likelihood_sigma**2
+                y_llik = log_likelihood(
+                    x_bar_t, y_sequence[t[0]], y_mask, variance_t, A
+                )
+
+                log_w = (reverse_llik + y_llik - reverse_cond_llik).view(
+                    N_BATCHES, K_batch
+                )
+                log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
+
+                w *= torch.exp(log_w - log_sum_w)
+                all_zeros = torch.all(w == 0, dim=1)
+
+                w[all_zeros] = 1 / K_batch
+                ess[all_zeros] = 0
+                w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
+                ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
+
+                pf_stats["ess"].append(ess.cpu())
+                pf_stats["w"].append(w.cpu())
+
                 x_t = x_bar_t
-                x_sequence.append(x_t)
-                continue
 
-            # Resample particles
-            with self.model.with_score(score):
-                reverse_llik = self.model.reverse_log_likelihood(
-                    x_bar_t, x_t, t, mask, mask
-                )
-            reverse_cond_llik = mvn.log_prob(x_bar_t.trans[:, :N_RESIDUES].view(-1, D))
-
-            variance_t = alpha_bar_t * self.likelihood_sigma**2
-            y_llik = log_likelihood(x_bar_t, y_sequence[t[0]], y_mask, variance_t, A)
-
-            log_w = (reverse_llik + y_llik - reverse_cond_llik).view(N_BATCHES, K_batch)
-            log_sum_w = torch.logsumexp(log_w, dim=1, keepdim=True)
-
-            w *= torch.exp(log_w - log_sum_w)
-            all_zeros = torch.all(w == 0, dim=1)
-
-            w[all_zeros] = 1 / K_batch
-            ess[all_zeros] = 0
-            w[~all_zeros] /= w[~all_zeros].sum(dim=1, keepdim=True)
-            ess[~all_zeros] = 1 / torch.sum(w[~all_zeros] ** 2, dim=1)
-
-            pf_stats["ess"].append(ess.cpu())
-            pf_stats["w"].append(w.cpu())
-
-            x_t = x_bar_t
-
-            self.resample(w, ess, [x_t.rots, x_t.trans])
-
-            x_sequence.append(x_t)
+                self.resample(w, ess, [x_t.rots, x_t.trans])
 
         if self.particle_filter:
             self.save_stats(pf_stats)

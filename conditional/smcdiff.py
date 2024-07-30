@@ -111,7 +111,8 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
             ess = torch.zeros(N_BATCHES, device=self.device)
 
         T = torch.tensor([N_TIMESTEPS - 1] * K, device=self.device).long()
-        score = self.model.score(x_T, T, mask)
+        score_T = self.model.score(x_T, T, mask)
+        score_t = score_T
 
         with torch.no_grad():
             for i in tqdm(
@@ -150,8 +151,8 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
 
                 # Re-weight based on motif at t-1
                 ## Find likelihood of getting motif when de-noised
-                with self.model.with_score(score):
-                    log_w = 0
+                log_w = 0
+                with self.model.with_score(score_t):
                     for j in range(N_MOTIFS):
                         x_motif_j = self.model.coords_to_frames(
                             motif_trajectory[i].trans[j : j + 1],
@@ -182,8 +183,8 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
                 self.resample(w, ess, [x_t.rots, x_t.trans])
 
                 # Propose next step
-                score = self.model.score(x_t, t, mask)
-                with self.model.with_score(score):
+                score_t = self.model.score(x_t, t, mask)
+                with self.model.with_score(score_t):
                     x_t = self.model.reverse_diffuse(x_t, t, mask)
                 x_trajectory.append(x_t)
 
