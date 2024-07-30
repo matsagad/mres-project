@@ -226,6 +226,11 @@ class GenieAdapter(FrameDiffusionModel):
         return log_density
 
     def score(self, x_t: Frames, t: Tensor, mask: Tensor) -> Tensor:
+        if self._cached_score is not None:
+            assert (
+                x_t.trans.shape == self._cached_score.shape
+            ), "Mismatch between cached score and input frame."
+            return self._cached_score
         epsilon = self._epsilon(x_t, t, mask)
         return -epsilon / self.model.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
 
