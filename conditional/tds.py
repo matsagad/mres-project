@@ -118,33 +118,38 @@ class TDS(ConditionalWrapper, ParticleFilter):
         alpha_bar_T = 1 - self.model.forward_variance[T[0]]
 
         # Initialise weights
-        score = self.model.score(x_T, T, mask)
+        score_T = self.model.score(x_T, T, mask)
         ## Custom context manager for caching score to avoid repeated calls to model
-        with self.model.with_score(score):
+        with self.model.with_score(score_T):
             x_zero_hat = self.model.predict_fully_denoised(x_T, T, mask)
 
         ## Calculate log likelihood and its gradient
         variance = 1 - alpha_bar_T + self.likelihood_sigma**2
         log_p_tilde_T = log_likelihood(x_zero_hat, y_zero, y_mask, variance)
         (grad_log_p_tilde_T,) = torch.autograd.grad(log_p_tilde_T.sum(), x_T.trans)
+
+        x_T.trans = x_T.trans.detach()
+        score_T = score_T.detach()
+        log_p_tilde_T = log_p_tilde_T.detach()
+        grad_log_p_tilde_T = grad_log_p_tilde_T.detach()
+
         log_p_tilde_T_sum = torch.logsumexp(
             log_p_tilde_T.view(N_BATCHES, K_batch), dim=1
         ).repeat_interleave(K_batch)
         log_p_tilde_T = log_p_tilde_T - log_p_tilde_T_sum
 
-        x_T.trans = x_T.trans.detach()
-
-        with torch.no_grad():
-            w = torch.exp(log_p_tilde_T).view(N_BATCHES, K_batch)
-            w /= torch.sum(w, dim=1, keepdim=True)
-            ess = 1 / torch.sum(w**2, dim=1).to(self.device)
+        w = torch.exp(log_p_tilde_T).view(N_BATCHES, K_batch)
+        w /= torch.sum(w, dim=1, keepdim=True)
+        ess = 1 / torch.sum(w**2, dim=1).to(self.device)
 
         x_t = x_T
-        log_p_tilde_t = log_p_tilde_T.detach()
-        grad_log_p_tilde_t = grad_log_p_tilde_T.detach()
+        score_t = score_T
+        log_p_tilde_t = log_p_tilde_T
+        grad_log_p_tilde_t = grad_log_p_tilde_T
 
         x_trajectory = [x_T]
         pf_stats = {"ess": [], "w": []}
+        FINAL_TIME_STEP = 0
 
         with torch.no_grad():
             for i in tqdm(
@@ -152,43 +157,48 @@ class TDS(ConditionalWrapper, ParticleFilter):
                 desc="Reverse diffusing samples",
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
+                initial=1,  # First iteration is completed above
             ):
                 # Resample objects
                 self.resample(
                     w,
                     ess,
-                    [x_t.rots, x_t.trans, score, log_p_tilde_t, grad_log_p_tilde_t],
+                    [x_t.rots, x_t.trans, score_t, log_p_tilde_t, grad_log_p_tilde_t],
                 )
-
-                ## Recenter with respect to motif segment's center-of-mass
-                ## (This is not necessary but makes for easier visual comparison when plotted)
-                if recenter_x:
-                    x_t.trans[:, :N_RESIDUES] -= torch.mean(
-                        x_t.trans[:, OBSERVED_REGION], dim=1
-                    ).unsqueeze(1)
 
                 t = torch.tensor([i] * K, device=self.device).long()
 
-                x_t_plus_one = x_t
-                t_plus_one = t
-
                 # Propose next step
                 ## Conditional score approximation s_{\theta}(x^{t + 1}, y=x_{M}^{0})
-                cond_score = score + grad_log_p_tilde_t * twist_scale
-                with self.model.with_score(cond_score):
-                    x_t = self.model.reverse_diffuse(x_t_plus_one, t_plus_one, mask)
+                cond_score_t = score_t + grad_log_p_tilde_t * twist_scale
+                with self.model.with_score(cond_score_t):
+                    x_t_minus_one = self.model.reverse_diffuse(x_t, t, mask)
 
-                x_trajectory.append(x_t)
+                ## Recenter motif segment's center-of-mass for ease in visualisation
+                if recenter_x:
+                    x_t_minus_one.trans[:, :N_RESIDUES] -= torch.mean(
+                        x_t_minus_one.trans[:, OBSERVED_REGION], dim=1
+                    ).unsqueeze(1)
+                x_trajectory.append(x_t_minus_one)
+                if i == FINAL_TIME_STEP:
+                    continue
+
+                ## Shift variable time indices
+                t_plus_one = t
+                x_t_plus_one = x_t
+                score_t_plus_one = score_t
+                cond_score_t_plus_one = cond_score_t
+                log_p_tilde_t_plus_one = log_p_tilde_t
 
                 t = t_plus_one - 1
-                log_p_tilde_t_plus_one = log_p_tilde_t
+                x_t = x_t_minus_one
 
                 # Update weights
                 alpha_bar_t = 1 - self.model.forward_variance[t[0]]
                 x_t.trans.requires_grad = True
                 with torch.enable_grad():
-                    score = self.model.score(x_t, t, mask)
-                    with self.model.with_score(score):
+                    score_t = self.model.score(x_t, t, mask)
+                    with self.model.with_score(score_t):
                         x_zero_hat = self.model.predict_fully_denoised(x_t, t, mask)
 
                     # We use Var(x_t | x_0) := (1 - alpha_bar_t) here but add
@@ -200,18 +210,19 @@ class TDS(ConditionalWrapper, ParticleFilter):
                     (grad_log_p_tilde_t,) = torch.autograd.grad(
                         log_p_tilde_t.sum(), x_t.trans
                     )
-                    log_p_tilde_t_sum = torch.logsumexp(
-                        log_p_tilde_t.view(N_BATCHES, K_batch), dim=1
-                    ).repeat_interleave(K_batch)
-                    log_p_tilde_t = log_p_tilde_t - log_p_tilde_t_sum
                 x_t.trans = x_t.trans.detach()
 
+                log_p_tilde_t_sum = torch.logsumexp(
+                    log_p_tilde_t.view(N_BATCHES, K_batch), dim=1
+                ).repeat_interleave(K_batch)
+                log_p_tilde_t = log_p_tilde_t - log_p_tilde_t_sum
+
                 ## Reverse log likelihoods
-                with self.model.with_score(score):
+                with self.model.with_score(score_t_plus_one):
                     reverse_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
                     )
-                with self.model.with_score(cond_score):
+                with self.model.with_score(cond_score_t_plus_one):
                     reverse_cond_llik = self.model.reverse_log_likelihood(
                         x_t, x_t_plus_one, t_plus_one, mask, mask
                     )
