@@ -8,4 +8,5 @@ sweep_dir: "multirun\
 name: "sample_given_motif"
 n_samples: 16
 sample_length: 128
+fixed_motif: True
 keep_coords_trace: False

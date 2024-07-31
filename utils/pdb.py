@@ -47,7 +47,7 @@ def pdb_to_atom_backbone(
     return backbones
 
 
-def pdb_to_c_alpha_backbone(f_pdb: str, chain: str="A") -> Tensor:
+def pdb_to_c_alpha_backbone(f_pdb: str, chain: str = "A") -> Tensor:
     return pdb_to_atom_backbone(f_pdb)[chain]["CA"]
 
 
@@ -195,6 +195,7 @@ def get_motif_mask(
 
 
 def split_multi_motif_spec(contig: str) -> Dict[str, str]:
+    COMMA = ","
     DASH = "-"
 
     common = []
@@ -206,7 +207,7 @@ def split_multi_motif_spec(contig: str) -> Dict[str, str]:
         r"/(?P<chain>[a-zA-Z]?)(?P<range>([0-9]+)|([0-9]+\-[0-9]+))"
         r"\{(?P<group_no>[0-9]+)\}$"
     )
-    for chunk in contig.split(","):
+    for chunk in contig.split(COMMA):
         if is_range.fullmatch(chunk):
             common.append(chunk)
             for group_specs in per_group_specs.values():
@@ -242,3 +243,95 @@ def split_multi_motif_spec(contig: str) -> Dict[str, str]:
             group_specs[motif] = ",".join(motif_specs)
 
     return per_group_specs
+
+
+def find_all_masks_satisfying_spec(
+    contig: str, length_range: Tuple[int, int]
+) -> Tuple[Tensor, Tensor]:
+    COMMA = ","
+    DASH = "-"
+    chain_segment = re.compile(
+        r"(?P<chain>[a-zA-Z]?)(?P<range>([0-9]+)|([0-9]+\-[0-9]+))"
+    )
+
+    ranges = []
+    is_motif = []
+    for chunk in contig.split(COMMA):
+        chunk_dict = chain_segment.fullmatch(chunk).groupdict()
+        chunk_chain = chunk_dict["chain"]
+        chunk_range = chunk_dict["range"]
+
+        is_motif.append(1 if chunk_chain else 0)
+
+        if DASH in chunk_range:
+            index_range = map(int, chunk_range.split(DASH))
+            if chunk_chain:
+                start, end = index_range
+                length = end - start + 1
+                ranges.append((length, length))
+            else:
+                min_length, max_length = index_range
+                ranges.append((min_length, max_length))
+        else:
+            if chunk_chain:
+                ranges.append((1, 1))
+            else:
+                length = int(chunk_range)
+                ranges.append((length, length))
+
+    solutions = []
+    min_target, max_target = length_range
+    _find_solutions([], solutions, ranges[::-1], 0, min_target, max_target)
+
+    solutions = torch.tensor(solutions)
+    is_motif = torch.tensor(is_motif)
+
+    return solutions, is_motif
+
+
+def _find_solutions(
+    curr: List[int],
+    solutions: List[List[int]],
+    backlog: List[Tuple[int, int]],
+    acc: int,
+    min_target: int,
+    max_target: int,
+):
+    if not backlog:
+        if min_target <= acc and acc <= max_target:
+            solutions.append(curr)
+        return
+    min_length, max_length = backlog.pop()
+    for length in range(min_length, max_length + 1):
+        if acc + length > max_target:
+            continue
+        _find_solutions(
+            curr + [length], solutions, backlog, acc + length, min_target, max_target
+        )
+    backlog.append((min_length, max_length))
+
+
+def get_motifs_and_masks_for_all_placements(
+    mask: Tensor, motif: Tensor, motif_mask: Tensor, contig: str
+) -> Tuple[Tensor, Tensor]:
+    N_RESIDUES = (mask[0] == 1).sum()
+    placements, motif_placement_mask = find_all_masks_satisfying_spec(
+        contig, (N_RESIDUES, N_RESIDUES)
+    )
+
+    motifs = []
+    motif_masks = []
+    for placement in placements:
+        motif_i = torch.zeros(motif.shape, device=motif.device)
+        motif_mask_i = torch.zeros(motif_mask.shape, device=motif_mask.device)
+
+        motif_range = torch.repeat_interleave(motif_placement_mask, placement) == 1
+        motif_i[:, :N_RESIDUES][:, motif_range] = motif[:, motif_mask[0] == 1]
+        motif_mask_i[:, :N_RESIDUES][:, motif_range] = 1
+
+        motifs.append(motif_i)
+        motif_masks.append(motif_mask_i)
+    motifs = torch.cat(motifs)
+    motif_masks = torch.cat(motif_masks)
+
+    return motifs, motif_masks

@@ -2,6 +2,7 @@ name: "tds"
 
 method: "tds"
 n_batches: 1
+fixed_motif: True
 likelihood_method: "mask"
 likelihood_sigma: 0.05
 resampling_method: "residual"

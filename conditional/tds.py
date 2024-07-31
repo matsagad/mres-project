@@ -1,5 +1,9 @@
 from conditional import register_conditional_method
-from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
+from conditional.components.particle_filter import (
+    ParticleFilter,
+    LikelihoodMethod,
+    LikelihoodReduction,
+)
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 from functools import partial
 from model.diffusion import FrameDiffusionModel
@@ -12,6 +16,7 @@ from utils.resampling import get_resampling_method
 
 class TDSConfig(ConditionalWrapperConfig):
     n_batches: int
+    fixed_motif: bool
     likelihood_method: LikelihoodMethod
     likelihood_sigma: float
     resampling_method: str
@@ -35,12 +40,14 @@ class TDS(ConditionalWrapper, ParticleFilter):
     def with_config(
         self,
         n_batches: int = 1,
+        fixed_motif: bool = True,
         likelihood_method: LikelihoodMethod = LikelihoodMethod.MASK,
         likelihood_sigma: float = 0.05,
         resampling_method: str = "residual",
         twist_scale: float = 1.0,
     ) -> "TDS":
         self.n_batches = n_batches
+        self.fixed_motif = fixed_motif
         self.likelihood_method = likelihood_method
         self.likelihood_sigma = likelihood_sigma
         self.resample_indices = get_resampling_method(resampling_method)
@@ -70,6 +77,8 @@ class TDS(ConditionalWrapper, ParticleFilter):
                 A_motif[range(d), motif_indices_flat] = 1
                 A.append(A_motif)
             log_likelihood = partial(log_likelihood, A=A)
+        if not self.fixed_motif:
+            log_likelihood = partial(log_likelihood, reduce=LikelihoodReduction.SUM)
 
         return self.sample_conditional(
             mask, motif, motif_mask, log_likelihood, recenter_x=True
@@ -245,5 +254,11 @@ class TDS(ConditionalWrapper, ParticleFilter):
                 pf_stats["ess"].append(ess.cpu())
 
         self.save_stats(pf_stats)
+        if not self.fixed_motif:
+            likelihoods = log_likelihood(
+                x_zero_hat, y_zero, y_mask, variance_t, reduce=LikelihoodReduction.NONE
+            )
+            most_likely_position = torch.argmax(likelihoods, dim=0)
+            self.save_stats({"motif_mask": y_mask[most_likely_position].unsqueeze(0)})
 
         return x_trajectory

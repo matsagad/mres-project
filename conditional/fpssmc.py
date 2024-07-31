@@ -3,8 +3,13 @@ from conditional.components.observation_generator import (
     LinearObservationGenerator,
     ObservationGenerationMethod,
 )
-from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
+from conditional.components.particle_filter import (
+    ParticleFilter,
+    LikelihoodMethod,
+    LikelihoodReduction,
+)
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
+from functools import partial
 from model.diffusion import FrameDiffusionModel
 from protein.frames import Frames
 import torch
@@ -136,6 +141,8 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         x_t = x_T
 
         log_likelihood = self.get_log_likelihood(LikelihoodMethod.MATRIX)
+        if not self.fixed_motif:
+            log_likelihood = partial(log_likelihood, reduce=LikelihoodReduction.SUM)
         w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
         ess = torch.zeros(N_BATCHES, device=self.device)
         pf_stats = {"ess": [], "w": []}
@@ -243,5 +250,17 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
         if self.particle_filter:
             self.save_stats(pf_stats)
+
+        if not self.fixed_motif:
+            likelihoods = log_likelihood(
+                x_sequence[-1],
+                y_sequence[t[0]],
+                y_mask,
+                variance_t,
+                A,
+                reduce=LikelihoodReduction.NONE,
+            )
+            most_likely_position = torch.argmax(likelihoods, dim=0)
+            self.save_stats({"motif_mask": y_mask[most_likely_position].unsqueeze(0)})
 
         return x_sequence

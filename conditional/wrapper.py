@@ -4,7 +4,7 @@ import os
 from torch import Tensor
 import torch
 import tqdm
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from utils.path import out_dir
 from utils.registry import ConfigOutline
 
@@ -188,11 +188,14 @@ class ConditionalWrapper(ABC):
         out = out_dir()
         os.makedirs(os.path.join(out, "stats"), exist_ok=True)
         for stat, values in stats.items():
-            if not values:
+            if isinstance(values, list) and not values:
                 continue
-            tensor_values = (
-                torch.stack(values)
-                if type(values[0]) == torch.Tensor
-                else torch.tensor(values)
-            )
+            if isinstance(values, Tensor):
+                tensor_values = values
+            else:
+                tensor_values = (
+                    torch.stack(values)
+                    if type(values[0]) == torch.Tensor
+                    else torch.tensor(values)
+                )
             torch.save(tensor_values, os.path.join(out, "stats", f"{stat}.pt"))

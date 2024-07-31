@@ -3,7 +3,11 @@ from conditional.components.observation_generator import (
     LinearObservationGenerator,
     ObservationGenerationMethod,
 )
-from conditional.components.particle_filter import ParticleFilter, LikelihoodMethod
+from conditional.components.particle_filter import (
+    ParticleFilter,
+    LikelihoodMethod,
+    LikelihoodReduction,
+)
 from conditional.wrapper import ConditionalWrapper, ConditionalWrapperConfig
 from functools import partial
 from enum import Enum
@@ -23,6 +27,7 @@ class BPFMethod(str, Enum):
 class BPFConfig(ConditionalWrapperConfig):
     n_batches: int
     conditional_method: BPFMethod
+    fixed_motif: bool
     observed_sequence_method: ObservationGenerationMethod
     observed_sequence_noised: bool
     likelihood_method: LikelihoodMethod
@@ -50,6 +55,7 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self,
         n_batches: int = 1,
         conditional_method: BPFMethod = BPFMethod.PROJECTION,
+        fixed_motif: bool = True,
         observed_sequence_method: ObservationGenerationMethod = ObservationGenerationMethod.BACKWARD,
         observed_sequence_noised: bool = True,
         likelihood_method: LikelihoodMethod = LikelihoodMethod.MASK,
@@ -59,6 +65,7 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
     ) -> "BPF":
         self.n_batches = n_batches
         self.conditional_method = conditional_method
+        self.fixed_motif = fixed_motif
         self.observed_sequence_method = observed_sequence_method
         self.observed_sequence_noised = observed_sequence_noised
         self.likelihood_method = likelihood_method
@@ -93,6 +100,9 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
         if self.likelihood_method == LikelihoodMethod.MATRIX:
             log_likelihood = partial(log_likelihood, A=A)
+
+        if not self.fixed_motif:
+            log_likelihood = partial(log_likelihood, reduce=LikelihoodReduction.SUM)
 
         return self.sample_conditional(
             mask, motif, motif_mask, A, log_likelihood, recenter_y=True, recenter_x=True
@@ -239,5 +249,12 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
         if self.particle_filter:
             self.save_stats(pf_stats)
+
+        if not self.fixed_motif:
+            likelihoods = log_likelihood(
+                llik_x_t, llik_y_t, y_mask, variance_t, reduce=LikelihoodReduction.NONE
+            )
+            most_likely_position = torch.argmax(likelihoods, dim=0)
+            self.save_stats({"motif_mask": y_mask[most_likely_position].unsqueeze(0)})
 
         return x_sequence

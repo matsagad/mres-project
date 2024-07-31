@@ -2,12 +2,14 @@ from conditional import CONDITIONAL_METHOD_REGISTRY
 from experiments import register_experiment
 import logging
 from model import DIFFUSION_MODEL_REGISTRY
+from model.diffusion import FrameDiffusionModel
 import numpy as np
 from omegaconf import DictConfig
 import omegaconf
 import os
 from pathlib import Path
 import subprocess
+import shutil
 from timeit import Timer
 import torch
 from utils.path import out_dir
@@ -18,9 +20,29 @@ from utils.pdb import (
     c_alpha_backbone_to_pdb,
     get_motif_mask,
     split_multi_motif_spec,
+    get_motifs_and_masks_for_all_placements,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_model(model_cfg: DictConfig) -> FrameDiffusionModel:
+    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
+        raise Exception(
+            f"No model called: '{model_cfg.name}'. "
+            f"Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
+        )
+    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
+    model = model_class(**model_config_resolver(model_cfg)).to(model_cfg.device)
+    return model
+
+
+def check_valid_method(method: str) -> None:
+    if method not in CONDITIONAL_METHOD_REGISTRY:
+        raise Exception(
+            f"Invalid method supplied: {method}."
+            f"Valid options: {', '.join(CONDITIONAL_METHOD_REGISTRY.keys())}."
+        )
 
 
 @register_experiment("sample_given_motif")
@@ -28,71 +50,91 @@ def sample_given_motif(cfg: DictConfig) -> None:
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
-    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
-        raise Exception(
-            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
-        )
-    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
-    model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model = get_model(model_cfg)
 
     motif_cfg = cfg.experiment.motif
     motif_backbones = pdb_to_atom_backbone(motif_cfg.path)
-    motif_mask, mask, masked_backbones = get_motif_mask(
+    _motif_mask, mask, masked_backbones = get_motif_mask(
         motif_backbones,
         model.max_n_residues,
         motif_cfg.contig,
         return_masked_backbones=True,
     )
     motif = masked_backbones["CA"].to(device)
-    motif_mask = motif_mask.to(device)
+    motif_mask = _motif_mask.to(device)
     mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
 
     cond_cfg = cfg.experiment.conditional_method
-    method = cond_cfg.method
 
-    if method not in CONDITIONAL_METHOD_REGISTRY:
-        raise Exception(
-            f"Invalid method supplied: {method}. Valid options: {', '.join(CONDITIONAL_METHOD_REGISTRY.keys())}."
+    # Currently, logic only supports single but possibly discontiguous motif case
+    if not cfg.experiment.fixed_motif:
+        if not hasattr(cond_cfg, "fixed_motif"):
+            raise Exception(
+                f"Conditional method '{cond_cfg.name}' does not support having a variable motif placement."
+            )
+        cond_cfg.fixed_motif = cfg.experiment.fixed_motif
+        motif, motif_mask = get_motifs_and_masks_for_all_placements(
+            mask, motif, motif_mask, motif_cfg.contig
         )
+
+    method = cond_cfg.method
+    check_valid_method(method)
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
     samples = setup.sample_given_motif(mask, motif, motif_mask)
 
     out = out_dir()
-    os.makedirs(os.path.join(out, "scaffolds"))
+    scaffolds_dir = os.path.join(out, "scaffolds")
+    os.makedirs(scaffolds_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
+            os.path.join(scaffolds_dir, f"scaffold_{i}.pdb"),
         )
-    os.makedirs(os.path.join(out, "scaffolds_unique"))
+    unique_scaffolds_dir = os.path.join(out, "scaffolds_unique")
+    os.makedirs(unique_scaffolds_dir)
     n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
     for i, sample in enumerate(samples[-1][::n_per_batch]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds_unique", f"scaffold_{i}.pdb"),
+            os.path.join(unique_scaffolds_dir, f"scaffold_{i}.pdb"),
         )
 
+    motif_dir = os.path.join(out, "motif")
+    os.makedirs(motif_dir)
     atom_backbone_to_pdb(
         {
-            atom: backbone[:, (motif_mask[0] == 1).cpu()]
+            atom: backbone[:, _motif_mask[0] == 1]
             for atom, backbone in masked_backbones.items()
         },
-        os.path.join(out, "motif.pdb"),
+        os.path.join(motif_dir, "motif.pdb"),
     )
-    with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
+    if cfg.experiment.fixed_motif:
+        torch.save(_motif_mask.cpu(), os.path.join(motif_dir, "motif_mask.pt"))
+    else:
+        # If motif is not fixed, we want to know where it is likely located.
+        # At the end of each conditional method supporting this, we find
+        # the motif mask that maximises whichever the log-likelihood
+        # configuration was chosen. This is stored in stats/motif_mask.pt.
+        shutil.copyfile(
+            os.path.join(out, "stats", "motif_mask.pt"),
+            os.path.join(motif_dir, "motif_mask.pt"),
+        )
+
+    with open(os.path.join(motif_dir, "motif_cfg.yaml"), "w") as f:
         f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
 
     if cfg.experiment.keep_coords_trace:
-        os.makedirs(os.path.join(out, "traces"))
+        traces_dir = os.path.join(out, "traces")
+        os.makedirs(traces_dir)
         # [K, T, N_AA, 3]
         samples_trans = torch.stack(
             [sample.trans[:, mask[0] == 1].detach().cpu() for sample in samples]
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
+            torch.save(sample_trace, os.path.join(traces_dir, f"trace_{i}.pt"))
 
 
 @register_experiment("sample_given_multiple_motifs")
@@ -100,12 +142,7 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
-    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
-        raise Exception(
-            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
-        )
-    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
-    model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model = get_model(model_cfg)
 
     motif_cfg = cfg.experiment.multi_motif
     per_group_specs = split_multi_motif_spec(motif_cfg.contig)
@@ -149,12 +186,13 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
     mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
 
     cond_cfg = cfg.experiment.conditional_method
-    method = cond_cfg.method
-
-    if method not in CONDITIONAL_METHOD_REGISTRY:
+    if hasattr(cond_cfg, "fixed_motif") and not cond_cfg.fixed_motif:
         raise Exception(
-            f"Invalid method supplied: {method}. Valid options: {', '.join(CONDITIONAL_METHOD_REGISTRY.keys())}."
+            f"Sampling multiple motifs currently does not support having variable motif placements."
         )
+
+    method = cond_cfg.method
+    check_valid_method(method)
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
@@ -188,12 +226,7 @@ def sample_unconditional(cfg: DictConfig) -> None:
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
-    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
-        raise Exception(
-            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
-        )
-    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
-    model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model = get_model(model_cfg)
     model.compute_unique_only = False
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
@@ -228,12 +261,7 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
-    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
-        raise Exception(
-            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
-        )
-    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
-    model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model = get_model(model_cfg)
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
@@ -245,6 +273,11 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
     if not conditional_wrapper.supports_condition_on_symmetry:
         raise Exception(
             f"Conditional method {method} does not support conditioning on symmetry."
+        )
+    if hasattr(cond_cfg, "fixed_motif") and not cond_cfg.fixed_motif:
+        raise Exception(
+            "Sampling symmetry does not support variable motif placements. "
+            "Set experiment.conditional_method.fixed_motif=True."
         )
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
 
@@ -353,12 +386,7 @@ def debug_gpu_stats(cfg: DictConfig) -> None:
 
     device = torch.device(model_cfg.device)
 
-    if model_cfg.name not in DIFFUSION_MODEL_REGISTRY:
-        raise Exception(
-            f"No model called: '{model_cfg.name}'. Choose from: {', '.join(DIFFUSION_MODEL_REGISTRY.keys())}"
-        )
-    model_class, model_config_resolver = DIFFUSION_MODEL_REGISTRY[model_cfg.name]
-    model = model_class(**model_config_resolver(model_cfg)).to(device)
+    model = get_model(model_cfg)
     model.n_timesteps = exp_cfg.n_trials
 
     mask = torch.zeros((exp_cfg.n_samples, model.max_n_residues), device=device)

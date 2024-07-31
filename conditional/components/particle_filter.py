@@ -11,6 +11,12 @@ class LikelihoodMethod(str, Enum):
     DISTANCE = "distance"
 
 
+class LikelihoodReduction(Enum):
+    PRODUCT = 1
+    SUM = 2
+    NONE = 3
+
+
 class ParticleFilter:
     """
     Common subroutines for particle filtering algorithms.
@@ -59,16 +65,20 @@ class ParticleFilter:
         if likelihood_method == LikelihoodMethod.MASK:
 
             def log_likelihood(
-                x_t: Frames, y_t: Frames, y_mask: Tensor, variance: float
+                x_t: Frames,
+                y_t: Frames,
+                y_mask: Tensor,
+                variance: float,
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
             ) -> Tensor:
-                total_log_likelihood = 0
+                log_likelihoods = []
                 for i in range(len(y_mask)):
                     OBSERVED_REGION = y_mask[i] == 1
                     com_offset = torch.mean(
                         x_t.trans[:, OBSERVED_REGION], dim=1, keepdim=True
                     )
 
-                    total_log_likelihood += -0.5 * (
+                    llik = -0.5 * (
                         (
                             (
                                 y_t.trans[i : i + 1, OBSERVED_REGION]
@@ -78,7 +88,13 @@ class ParticleFilter:
                         )
                         / variance
                     ).sum(dim=(1, 2))
-                return total_log_likelihood
+                    log_likelihoods.append(llik)
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
 
             return log_likelihood
 
@@ -90,9 +106,10 @@ class ParticleFilter:
                 y_mask: Tensor,
                 variance: float,
                 A: List[Tensor],
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
             ) -> Tensor:
                 N_COORDS_PER_RESIDUE = 3
-                total_log_likelihood = 0
+                log_likelihoods = []
                 for i in range(len(y_mask)):
                     d, D = A[i].size()
                     N_RESIDUES = D // N_COORDS_PER_RESIDUE
@@ -101,7 +118,7 @@ class ParticleFilter:
                         x_t.trans[:, OBSERVED_REGION], dim=1
                     ).unsqueeze(1)
 
-                    total_log_likelihood += -0.5 * (
+                    llik = -0.5 * (
                         (
                             (
                                 y_t.trans[i : i + 1, OBSERVED_REGION].view(-1, d)
@@ -112,16 +129,27 @@ class ParticleFilter:
                         )
                         / variance
                     ).sum(dim=1)
-                return total_log_likelihood
+                    log_likelihoods.append(llik)
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
 
             return log_likelihood
 
         if likelihood_method == LikelihoodMethod.DISTANCE:
 
             def log_likelihood(
-                x_t: Frames, y_t: Frames, y_mask: Tensor, variance: float
+                x_t: Frames,
+                y_t: Frames,
+                y_mask: Tensor,
+                variance: float,
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
             ) -> Tensor:
-                total_log_likelihood = 0
+                log_likelihoods = []
+                dist_x_full = torch.cdist(x_t.trans, x_t.trans)
                 for i in range(len(y_mask)):
                     y_t_trans = y_t.trans[i : i + 1]
                     OBSERVED_REGION = y_mask[i] == 1
@@ -131,15 +159,18 @@ class ParticleFilter:
                     dist_y = torch.cdist(
                         y_t_trans[:, OBSERVED_REGION], y_t_trans[:, OBSERVED_REGION]
                     )[:, _i, _j].view(1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
-                    dist_x = torch.cdist(
-                        x_t.trans[:, OBSERVED_REGION],
-                        x_t.trans[:, OBSERVED_REGION],
-                    )[:, _i, _j].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
+                    dist_x = dist_x_full[:, OBSERVED_REGION][:, :, OBSERVED_REGION][
+                        :, _i, _j
+                    ].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
 
-                    total_log_likelihood += (
-                        -0.5 * ((dist_y - dist_x) ** 2) / variance
-                    ).sum(dim=1)
-                return total_log_likelihood
+                    llik = (-0.5 * ((dist_y - dist_x) ** 2) / variance).sum(dim=1)
+                    log_likelihoods.append(llik)
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
 
             return log_likelihood
 

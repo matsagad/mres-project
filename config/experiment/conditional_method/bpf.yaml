@@ -3,6 +3,7 @@ name: "bpf"
 method: "bpf"
 n_batches: 1
 conditional_method: "projection"
+fixed_motif: True
 observed_sequence_method: "backward"
 observed_sequence_noised: True
 likelihood_method: "mask"
