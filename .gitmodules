@@ -1,3 +1,6 @@
 [submodule "genie"]
 	path = submodules/genie
 	url = https://github.com/aqlaboratory/genie
+[submodule "submodules/insilico_design_pipeline"]
+	path = submodules/insilico_design_pipeline
+	url = https://github.com/aqlaboratory/insilico_design_pipeline.git
