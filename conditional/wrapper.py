@@ -180,6 +180,9 @@ class ConditionalWrapper(ABC):
             ):
                 t = torch.tensor([i] * mask.shape[0], device=self.device).long()
                 x_t = self.model.reverse_diffuse(x_t, t, mask)
+                x_t.trans[:, mask[0] == 1] -= torch.mean(
+                    x_t.trans[:, mask[0] == 1], dim=1
+                ).unsqueeze(1)
                 x_trajectory.append(x_t)
 
         return x_trajectory
