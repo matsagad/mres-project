@@ -261,6 +261,6 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                 reduce=LikelihoodReduction.NONE,
             )
             most_likely_position = torch.argmax(likelihoods, dim=0)
-            self.save_stats({"motif_mask": y_mask[most_likely_position].unsqueeze(0)})
+            self.save_stats({"motif_mask": y_mask[most_likely_position]})
 
         return x_sequence

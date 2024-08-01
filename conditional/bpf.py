@@ -255,6 +255,6 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                 llik_x_t, llik_y_t, y_mask, variance_t, reduce=LikelihoodReduction.NONE
             )
             most_likely_position = torch.argmax(likelihoods, dim=0)
-            self.save_stats({"motif_mask": y_mask[most_likely_position].unsqueeze(0)})
+            self.save_stats({"motif_mask": y_mask[most_likely_position]})
 
         return x_sequence

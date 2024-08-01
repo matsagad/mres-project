@@ -3,9 +3,8 @@ from experiments import register_experiment
 import logging
 from model import DIFFUSION_MODEL_REGISTRY
 from model.diffusion import FrameDiffusionModel
-import numpy as np
-from omegaconf import DictConfig
 import omegaconf
+from omegaconf import DictConfig
 import os
 from pathlib import Path
 import subprocess
@@ -15,12 +14,13 @@ import torch
 from utils.path import out_dir
 from utils.pdb import (
     pdb_to_atom_backbone,
-    pdb_to_c_alpha_backbone,
     atom_backbone_to_pdb,
     c_alpha_backbone_to_pdb,
     get_motif_mask,
     split_multi_motif_spec,
     get_motifs_and_masks_for_all_placements,
+    create_evaluation_motif_pdb,
+    create_evaluation_multi_motif_pdb,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,11 +47,13 @@ def check_valid_method(method: str) -> None:
 
 @register_experiment("sample_given_motif")
 def sample_given_motif(cfg: DictConfig) -> None:
+    # Set-up diffusion model
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
     model = get_model(model_cfg)
 
+    # Parse through motif problem configuration
     motif_cfg = cfg.experiment.motif
     motif_backbones = pdb_to_atom_backbone(motif_cfg.path)
     _motif_mask, mask, masked_backbones = get_motif_mask(
@@ -66,7 +68,8 @@ def sample_given_motif(cfg: DictConfig) -> None:
 
     cond_cfg = cfg.experiment.conditional_method
 
-    # Currently, logic only supports single but possibly discontiguous motif case
+    ## Currently, logic only supports the case where we have a single
+    ## but possibly discontiguous motif. No multiple motifs.
     if not cfg.experiment.fixed_motif:
         if not hasattr(cond_cfg, "fixed_motif"):
             raise Exception(
@@ -77,22 +80,25 @@ def sample_given_motif(cfg: DictConfig) -> None:
             mask, motif, motif_mask, motif_cfg.contig
         )
 
+    # Choose conditional sampler
     method = cond_cfg.method
     check_valid_method(method)
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
+    # Sample conditional on a motif being present
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
     samples = setup.sample_given_motif(mask, motif, motif_mask)
 
     out = out_dir()
-    scaffolds_dir = os.path.join(out, "scaffolds")
+    # Save scaffolds
+    scaffolds_dir = os.path.join(out, "scaffolds_all_particles")
     os.makedirs(scaffolds_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
             os.path.join(scaffolds_dir, f"scaffold_{i}.pdb"),
         )
-    unique_scaffolds_dir = os.path.join(out, "scaffolds_unique")
+    unique_scaffolds_dir = os.path.join(out, "scaffolds")
     os.makedirs(unique_scaffolds_dir)
     n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
     for i, sample in enumerate(samples[-1][::n_per_batch]):
@@ -101,6 +107,7 @@ def sample_given_motif(cfg: DictConfig) -> None:
             os.path.join(unique_scaffolds_dir, f"scaffold_{i}.pdb"),
         )
 
+    # Save motif C-alpha coords, mask, and filtered PDB for evaluation
     motif_dir = os.path.join(out, "motif")
     os.makedirs(motif_dir)
     atom_backbone_to_pdb(
@@ -108,23 +115,38 @@ def sample_given_motif(cfg: DictConfig) -> None:
             atom: backbone[:, _motif_mask[0] == 1]
             for atom, backbone in masked_backbones.items()
         },
-        os.path.join(motif_dir, "motif.pdb"),
+        os.path.join(motif_dir, "motif_ca.pdb"),
     )
     if cfg.experiment.fixed_motif:
         torch.save(_motif_mask.cpu(), os.path.join(motif_dir, "motif_mask.pt"))
+        create_evaluation_motif_pdb(
+            os.path.join(motif_dir, "motif.pdb"),
+            motif_cfg.path,
+            _motif_mask,
+            motif_cfg.contig,
+        )
     else:
         # If motif is not fixed, we want to know where it is likely located.
         # At the end of each conditional method supporting this, we find
         # the motif mask that maximises whichever the log-likelihood
         # configuration was chosen. This is stored in stats/motif_mask.pt.
+        path_to_likely_motif_mask = os.path.join(out, "stats", "motif_mask.pt")
         shutil.copyfile(
-            os.path.join(out, "stats", "motif_mask.pt"),
+            path_to_likely_motif_mask,
             os.path.join(motif_dir, "motif_mask.pt"),
         )
-
+        likely_motif_mask = torch.load(path_to_likely_motif_mask)[::n_per_batch]
+        for i in range(len(likely_motif_mask)):
+            create_evaluation_motif_pdb(
+                os.path.join(motif_dir, f"motif_{i}.pdb"),
+                motif_cfg.path,
+                likely_motif_mask[i : i + 1],
+                motif_cfg.contig,
+            )
     with open(os.path.join(motif_dir, "motif_cfg.yaml"), "w") as f:
         f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
 
+    # Save trace of coordinates throughout diffusion process
     if cfg.experiment.keep_coords_trace:
         traces_dir = os.path.join(out, "traces")
         os.makedirs(traces_dir)
@@ -139,11 +161,13 @@ def sample_given_motif(cfg: DictConfig) -> None:
 
 @register_experiment("sample_given_multiple_motifs")
 def sample_given_multiple_motifs(cfg: DictConfig) -> None:
+    # Set-up model
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
     model = get_model(model_cfg)
 
+    # Parse through multi-motif problem configuration
     motif_cfg = cfg.experiment.multi_motif
     per_group_specs = split_multi_motif_spec(motif_cfg.contig)
 
@@ -154,9 +178,11 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
     mask = None
     motifs = []
     motif_masks = []
+    unmerged_motif_masks = {}
     for group_no, group_specs in per_group_specs.items():
         group_motif = torch.zeros((1, model.max_n_residues, 3))
         group_motif_mask = torch.zeros((1, model.max_n_residues))
+        unmerged_motif_masks[group_no] = {}
 
         for motif_name, motif_specs in group_specs.items():
             motif_mask, mask, masked_backbones = get_motif_mask(
@@ -167,10 +193,11 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
             )
             group_motif += masked_backbones["CA"]
             group_motif_mask += motif_mask
+            unmerged_motif_masks[group_no][motif_name] = motif_mask
 
-        # Make motif zero-centred. This assumes each motif group is composed
-        # of segments from only one protein. Otherwise, their centre of masses
-        # will be inconsistent with each other.
+        ## Make motif zero-centred. This assumes each motif group is composed
+        ## of segments from only one protein. Otherwise, their centre of masses
+        ## will be inconsistent with each other.
         group_motif[:, group_motif_mask[0] == 1] -= torch.mean(
             group_motif[:, group_motif_mask[0] == 1], dim=1, keepdim=True
         )
@@ -191,38 +218,55 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
             f"Sampling multiple motifs currently does not support having variable motif placements."
         )
 
+    # Choose conditional sampler
     method = cond_cfg.method
     check_valid_method(method)
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
+    # Sample given multiple motifs
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
     samples = setup.sample_given_motif(mask, motifs, motif_masks)
 
     out = out_dir()
-    os.makedirs(os.path.join(out, "scaffolds"))
+    # Save scaffolds
+    scaffolds_dir = os.path.join(out, "scaffolds_all_particles")
+    os.makedirs(scaffolds_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
+            os.path.join(scaffolds_dir, f"scaffold_{i}.pdb"),
         )
-    os.makedirs(os.path.join(out, "scaffolds_unique"))
+    unique_scaffolds_dir = os.path.join(out, "scaffolds")
+    os.makedirs(unique_scaffolds_dir)
     n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
     for i, sample in enumerate(samples[-1][::n_per_batch]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds_unique", f"scaffold_{i}.pdb"),
+            os.path.join(unique_scaffolds_dir, f"scaffold_{i}.pdb"),
         )
-    os.makedirs(os.path.join(out, "motifs"))
+
+    # Save motif C-alpha coords, mask, and (stacked) filtered PDB for evaluation
+    motif_dir = os.path.join(out, "motif")
+    os.makedirs(motif_dir)
     for i, backbone in enumerate(motifs):
         c_alpha_backbone_to_pdb(
-            backbone[motif_masks[i] == 1], os.path.join(out, "motifs", f"motif_{i}.pdb")
+            backbone[motif_masks[i] == 1], os.path.join(motif_dir, f"motif_ca_{i}.pdb")
         )
-    with open(os.path.join(out, "motif_cfg.yaml"), "w") as f:
+    torch.save(motif_masks.cpu(), os.path.join(motif_dir, "motif_mask.pt"))
+    f_pdbs = {Path(motif_path).stem: motif_path for motif_path in motif_cfg.paths}
+    create_evaluation_multi_motif_pdb(
+        os.path.join(motif_dir, "motif.pdb"),
+        f_pdbs,
+        unmerged_motif_masks,
+        per_group_specs,
+    )
+    with open(os.path.join(motif_dir, "motif_cfg.yaml"), "w") as f:
         f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
 
 
 @register_experiment("sample_unconditional")
 def sample_unconditional(cfg: DictConfig) -> None:
+    # Set-up model
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
@@ -232,32 +276,38 @@ def sample_unconditional(cfg: DictConfig) -> None:
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
 
-    # WLOG just choose any method and call on their unconditional sample method.
+    # Sample protein unconditionally
+    ## WLOG just choose any method and call on their unconditional sample method.
     conditional_method, _ = CONDITIONAL_METHOD_REGISTRY["bpf"]
     setup = conditional_method(model)
     samples = setup.sample(mask)
 
     out = out_dir()
-    os.makedirs(os.path.join(out, "samples"))
+    # Save samples
+    samples_dir = os.path.join(out, "samples")
+    os.makedirs(samples_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans.detach().cpu(),
-            os.path.join(out, "samples", f"sample_{i}.pdb"),
+            os.path.join(samples_dir, f"sample_{i}.pdb"),
         )
 
+    # Save trace of coordinates throughout diffusion process
     if cfg.experiment.keep_coords_trace:
-        os.makedirs(os.path.join(out, "traces"))
+        trace_dir = os.path.join(out, "traces")
+        os.makedirs(trace_dir)
         # [K, T, N_AA, 3]
         samples_trans = torch.stack(
             [sample.trans.detach().cpu() for sample in samples]
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
+            torch.save(sample_trace, os.path.join(trace_dir, f"trace_{i}.pt"))
 
 
 @register_experiment("sample_given_symmetry")
 def sample_given_symmetry(cfg: DictConfig) -> None:
+    # Set-up model
     model_cfg = cfg.model
     device = torch.device(model_cfg.device)
 
@@ -266,9 +316,11 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
     mask[:, : cfg.experiment.sample_length] = 1
 
+    # Choose conditional sampler
     cond_cfg = cfg.experiment.conditional_method
     method = cond_cfg.name
 
+    ## Check method supports sampling symmetry
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
     if not conditional_wrapper.supports_condition_on_symmetry:
         raise Exception(
@@ -279,104 +331,152 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
             "Sampling symmetry does not support variable motif placements. "
             "Set experiment.conditional_method.fixed_motif=True."
         )
-    setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
 
+    # Sample protein conditioned on point symmetry group
+    setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
     samples = setup.sample_given_symmetry(mask, cfg.experiment.symmetry)
 
     out = out_dir()
-    os.makedirs(os.path.join(out, "scaffolds"))
+    # Save samples
+    samples_dir = os.path.join(out, "samples")
+    os.makedirs(samples_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
-            os.path.join(out, "scaffolds", f"scaffold_{i}.pdb"),
+            os.path.join(samples_dir, f"sample_{i}.pdb"),
         )
 
+    # Save trace of coordinates throughout diffusion process
     if cfg.experiment.keep_coords_trace:
-        os.makedirs(os.path.join(out, "traces"))
+        trace_dir = os.path.join(out, "traces")
+        os.makedirs(trace_dir)
         # [K, T, N_AA, 3]
         samples_trans = torch.stack(
-            [sample.trans[mask[0] == 1].detach().cpu() for sample in samples]
+            [sample.trans.detach().cpu() for sample in samples]
         ).swapaxes(0, 1)
 
         for i, sample_trace in enumerate(samples_trans):
-            torch.save(sample_trace, os.path.join(out, "traces", f"trace_{i}.pt"))
+            torch.save(sample_trace, os.path.join(trace_dir, f"trace_{i}.pt"))
 
 
 @register_experiment("evaluate_samples")
 def evaluate_samples(cfg: DictConfig) -> None:
-    path_to_samples = cfg.experiment.path_to_samples
-    path_to_motif = cfg.experiment.path_to_motif
-    path_to_motif_cfg = cfg.experiment.path_to_motif_cfg
+    PATH_TO_PIPELINE_SUBMODULE = "submodules/insilico_design_pipeline"
+
+    path_to_experiment = cfg.experiment.path_to_experiment
+    n_gpus = len(cfg.experiment.gpu_devices)
+    n_cpus = cfg.experiment.n_cpus
+    ENV_CUDA_VISIBLE_DEVICES = ",".join(map(str, cfg.experiment.gpu_devices))
+    print(ENV_CUDA_VISIBLE_DEVICES)
+
+    is_motif_scaffolding = os.path.isdir(os.path.join(path_to_experiment, "motif"))
 
     out = out_dir()
-    n_samples = 0
 
-    # Populate coords folder with CA atom coordinates of each sample
-    path_to_coords = os.path.join(out, "coords")
-    os.makedirs(path_to_coords)
-    sample_lengths = []
-    with os.scandir(path_to_samples) as files:
-        for file in files:
-            if file.is_file() and file.name.endswith(".pdb"):
-                n_samples += 1
-                c_alpha_coords = pdb_to_c_alpha_backbone(
-                    os.path.join(path_to_samples, file.name)
-                ).numpy()
-                out_name = f"{file.name.split('.')[0]}.npy"
-                np.savetxt(
-                    os.path.join(out, "coords", out_name),
-                    c_alpha_coords,
-                    fmt="%.3f",
-                    delimiter=",",
+    # Create folder for generated samples/scaffolds
+    pdb_dir = os.path.join(out, "pdbs")
+    path_to_samples = os.path.join(
+        path_to_experiment, ("scaffolds" if is_motif_scaffolding else "samples")
+    )
+    shutil.copytree(path_to_samples, pdb_dir)
+    n_scaffolds = len(
+        [name for name in os.listdir(path_to_samples) if name.endswith(".pdb")]
+    )
+
+    # Create folder for the accompanying motifs with chain indices
+    # matching where it should be located in the scaffold
+    if is_motif_scaffolding:
+        motif_dir = os.path.join(out, "motif_pdbs")
+        os.makedirs(motif_dir)
+
+        exp_motif_dir = os.path.join(path_to_experiment, "motif")
+        path_to_motif_pdb = os.path.join(exp_motif_dir, "motif.pdb")
+
+        ## Note: file should be named the same as the scaffold
+        is_fixed_motif = os.path.isfile(path_to_motif_pdb)
+        if is_fixed_motif:
+            for i in range(n_scaffolds):
+                shutil.copyfile(
+                    path_to_motif_pdb, os.path.join(motif_dir, f"scaffold_{i}.pdb")
                 )
-                sample_lengths.append(len(c_alpha_coords))
+        else:
+            for i in range(n_scaffolds):
+                motif_placement_pdb = os.path.join(exp_motif_dir, f"motif_{i}.pdb")
+                assert os.path.isfile(motif_placement_pdb)
+                shutil.copyfile(
+                    motif_placement_pdb, os.path.join(motif_dir, f"scaffold_{i}.pdb")
+                )
 
-    # Load motif config file
-    motif_cfg = omegaconf.OmegaConf.load(path_to_motif_cfg)
-    motif_backbones = pdb_to_atom_backbone(path_to_motif)
-    motif_mask, _ = get_motif_mask(
-        motif_backbones,
-        max(sample_lengths),
-        motif_cfg.contig,
-        return_masked_backbones=False,
-    )
-
-    # Populate motif_masks folder with bitmasks for each sample
-    path_to_masks = os.path.join(out, "motif_masks")
-    os.makedirs(path_to_masks)
-    for i in range(n_samples):
-        np.savetxt(
-            os.path.join(path_to_masks, f"scaffold_{i}.npy"),
-            # Motif mask must be same size as sample lengths
-            motif_mask[0, : sample_lengths[i]].numpy(),
-            fmt="%.3f",
-            delimiter=",",
+        exp_motif_cfg = omegaconf.OmegaConf.load(
+            os.path.join(exp_motif_dir, "motif_cfg.yaml")
         )
-    np.savetxt(
-        os.path.join(path_to_masks, "motif.npy"),
-        motif_backbones["A"]["CA"],
-        fmt="%.3f",
-        delimiter=",",
-    )
+        motif_name = exp_motif_cfg.name
 
-    eval_out = os.path.join(out, "evaluation")
-    eval_cmd_args = [
-        "python3",
-        "evaluations/pipeline/evaluate.py",
-        f"--input_dir={out}",  # Must contain "coords" and "motif_masks" subfolders
-        f"--output_dir={eval_out}",
-    ]
-    if path_to_motif:
-        eval_cmd_args.append(f"--motif_filepath={path_to_motif}")
-    if not os.path.isdir("submodules/genie/packages"):
-        raise Exception(
-            "Genie packages folder missing: have you run `submodules/genie/scripts/setup_evaluation_pipeline.sh`?"
-        )
-    eval = subprocess.Popen(
-        eval_cmd_args,
-        cwd=os.path.join(os.getcwd(), "submodules/genie"),
+    pip_dir = os.path.join(os.getcwd(), PATH_TO_PIPELINE_SUBMODULE)
+    version = "scaffold" if is_motif_scaffolding else "unconditional"
+    env = dict(os.environ).update({"CUDA_VISIBLE_DEVICES": ENV_CUDA_VISIBLE_DEVICES})
+
+    # Run standard/designability pipeline
+    logger.info("Running designability pipeline.")
+    design_pip = subprocess.Popen(
+        [
+            "python3",
+            "pipeline/standard/evaluate.py",
+            f"--version={version}",
+            f"--rootdir={out}",
+            f"--num_devices={n_gpus}",
+            f"--num_processes={n_gpus}",
+            f"--verbose",
+        ],
+        cwd=pip_dir,
+        env=env,
     )
-    eval.wait()
+    design_pip.wait()
+
+    # Run diversity pipeline
+    logger.info("Running diversity pipeline.")
+    diversity_pip = subprocess.Popen(
+        [
+            "python3",
+            "pipeline/diversity/evaluate.py",
+            f"--rootdir={out}",
+            f"--num_cpus={n_cpus}",
+        ],
+        cwd=pip_dir,
+        env=env,
+    )
+    diversity_pip.wait()
+
+    # Profile results
+    ## Abide by folder format for profiling scaffolding problems by
+    ## temporarily creating a directory of subdirectories to store results
+    if is_motif_scaffolding:
+        temp_dir = os.path.join(out, f"_temp_dir_{motif_name}")
+        temp_motif_dir = os.path.join(temp_dir, f"motif={motif_name}")
+        os.makedirs(temp_motif_dir)
+        os.symlink(pdb_dir, os.path.join(temp_motif_dir, "pdbs"))
+        os.symlink(motif_dir, os.path.join(temp_motif_dir, "motif_pdbs"))
+        os.symlink(
+            os.path.join(out, "info.csv"), os.path.join(temp_motif_dir, "info.csv")
+        )
+
+    ## Note: if designability or diversity is zero, it throws a division by zero
+    ## exception when computing for the F1 score
+    logger.info("Profiling results.")
+    profile_pip = subprocess.Popen(
+        [
+            "python3",
+            f"scripts/analysis/profile_{version}.py",
+            f"--rootdir={temp_dir}",
+        ],
+        cwd=pip_dir,
+        env=env,
+    )
+    profile_pip.wait()
+
+    ## Remove temporary directory
+    if is_motif_scaffolding:
+        shutil.rmtree(temp_dir)
 
 
 @register_experiment("debug_gpu_stats")

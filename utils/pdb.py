@@ -7,6 +7,12 @@ from typing import Dict, List, Tuple, Union
 def pdb_to_atom_backbone(
     f_pdb: str, atoms: List[str] = ["N", "CA", "C", "O"]
 ) -> Dict[str, Dict[str, Tensor]]:
+    """
+    Given a PDB file, it retrieves the 3D coordinates of specified
+    backbone atoms in each chain of the protein. I.e. the output is a
+    dictionary that maps each chain to a dictionary of each atom and
+    its 3D coordinates.
+    """
     LABELS = "xyz"
     atom_line = re.compile(
         rf"^ATOM\s*[0-9]+\s*(?P<atom>({'|'.join(atoms)}))"
@@ -48,6 +54,10 @@ def pdb_to_atom_backbone(
 
 
 def pdb_to_c_alpha_backbone(f_pdb: str, chain: str = "A") -> Tensor:
+    """
+    Given a PDB file, extract the C-alpha backbone coordinates of
+    a specified chain.
+    """
     return pdb_to_atom_backbone(f_pdb)[chain]["CA"]
 
 
@@ -58,6 +68,10 @@ def atom_backbone_to_pdb(
     placeholder_chain: str = "A",
     atoms: List[str] = ["N", "CA", "C", "O"],
 ) -> None:
+    """
+    Converts a given backbone dictionary (mapping atom to coordinates)
+    into a PDB file. Note that atom indices start at one.
+    """
     LABELS = "xyz"
     N_DIGITS = 6
     temp = (
@@ -72,7 +86,7 @@ def atom_backbone_to_pdb(
     }
 
     lines = []
-    atom_i = 0
+    atom_i = 1
     for i in range(max(map(len, squeezed_backbones.values()))):
         for atom in atoms:
             if i >= len(squeezed_backbones[atom]):
@@ -87,7 +101,7 @@ def atom_backbone_to_pdb(
                     atom=atom,
                     aa=placeholder_aa,
                     chain=placeholder_chain,
-                    res_idx=i,
+                    res_idx=i + 1,
                     **dict(zip(LABELS, trunc_coords)),
                     atom_el=atom[0],
                 )
@@ -104,6 +118,9 @@ def c_alpha_backbone_to_pdb(
     placeholder_aa: str = "ALA",
     placeholder_chain: str = "A",
 ) -> None:
+    """
+    Convert 3D coordinates of the given C-alpha backbone into a PDB file.
+    """
     atom_backbone_to_pdb(
         {"CA": backbone.squeeze()},
         f_out,
@@ -113,12 +130,182 @@ def c_alpha_backbone_to_pdb(
     )
 
 
+def create_evaluation_motif_pdb(
+    f_out: str,
+    f_pdb: str,
+    motif_mask: Tensor,
+    contig: str,
+) -> None:
+    """
+    Filter existing motif PDB file so that:
+        - the chain indices are modified to match the motif mask,
+        - and only coordinates specified in the spec/contig remain.
+    """
+    eval_motif_pdb_str = _get_evaluation_motif_pdb_str(f_pdb, motif_mask, contig, "A")
+
+    with open(f_out, "w") as f:
+        f.write(eval_motif_pdb_str)
+
+
+def create_evaluation_multi_motif_pdb(
+    f_out: str,
+    f_pdbs: Dict[str, str],
+    unmerged_motif_masks: Dict[int, Dict[str, Tensor]],
+    per_group_specs: Dict[int, Dict[str, str]],
+) -> None:
+    """
+    Filter existing motif PDB files and stack them into one so that:
+        - the chain indices are modified to match the motif mask,
+        - only coordinates specified in the spec/contig remain,
+        - motifs in different groups are labelled in the segment id column,
+        - and the output file is stacked in order of chain index, regardless
+          of which group and protein it belongs to.
+    """
+    GROUP_NO_OFFSET = 1
+    segment_ids = [chr(ord("A") + group_no) for group_no in range(len(per_group_specs))]
+
+    overall_segmented_pdb = {}
+    for group_no, group_specs in per_group_specs.items():
+        for motif_name, motif_specs in group_specs.items():
+            segmented_pdb = _get_segmented_motif_pdb_by_index(
+                f_pdbs[motif_name],
+                unmerged_motif_masks[group_no][motif_name],
+                motif_specs,
+                segment_ids[group_no - GROUP_NO_OFFSET],
+            )
+
+            assert not set(segmented_pdb.keys()).intersection(
+                set(overall_segmented_pdb.keys())
+            )
+            overall_segmented_pdb.update(segmented_pdb)
+
+    filtered_output = []
+    for chain_index in sorted(overall_segmented_pdb.keys()):
+        filtered_output.append(overall_segmented_pdb[chain_index])
+
+    with open(f_out, "w") as f:
+        f.write("".join(filtered_output))
+
+
+def _get_evaluation_motif_pdb_str(
+    f_pdb: str,
+    motif_mask: Tensor,
+    contig: str,
+    segment_id: str,
+) -> str:
+    segmented_pdb = _get_segmented_motif_pdb_by_index(
+        f_pdb, motif_mask, contig, segment_id
+    )
+    filtered_output = []
+    for chain_index in sorted(segmented_pdb.keys()):
+        filtered_output.append(segmented_pdb[chain_index])
+    return "".join(filtered_output)
+
+
+def _get_segmented_motif_pdb_by_index(
+    f_pdb: str,
+    motif_mask: Tensor,
+    contig: str,
+    segment_id: str,
+) -> Dict[int, str]:
+    COMMA = ","
+    DASH = "-"
+    NEWLINE = "\n"
+    PDB_INDEX_OFFSET = 1
+    chain_segment = re.compile(
+        r"(?P<chain>[a-zA-Z]?)(?P<range>([0-9]+)|([0-9]+\-[0-9]+))"
+    )
+
+    segments_to_keep = {}
+
+    motif_index = 0
+    motif_indices = (
+        torch.argwhere(motif_mask[0].cpu()).squeeze() + PDB_INDEX_OFFSET
+    ).tolist()
+
+    for chunk in contig.split(COMMA):
+        chunk_dict = chain_segment.fullmatch(chunk).groupdict()
+        chunk_chain = chunk_dict["chain"]
+        chunk_range = chunk_dict["range"]
+        if not chunk_chain:
+            continue
+        if chunk_chain not in segments_to_keep:
+            segments_to_keep[chunk_chain] = {}
+        if DASH in chunk_range:
+            start, end = map(int, chunk_range.split(DASH))
+            for i in range(start, end + 1):
+                segments_to_keep[chunk_chain][i] = motif_indices[motif_index]
+                motif_index += 1
+        else:
+            index = int(chunk_range)
+            segments_to_keep[chunk_chain][index] = motif_indices[motif_index]
+            motif_index += 1
+
+    LABELS = "xyzot"
+    atom_line = re.compile(
+        rf"^ATOM\s*[0-9]+\s*(?P<atom>[a-zA-Z]*)"
+        + r"\s+[a-zA-Z]+\s+(?P<chain>[a-zA-Z])(?P<chain_index>\s*[0-9]+)\s*"
+        + r"\s*".join(rf"(?P<{label}>[0-9\.\-]+)" for label in LABELS)
+        + r"\s+(?P<segment_id>[a-zA-Z]?)\s+(?P<element>[a-zA-Z0-9\+\-])"
+    )
+
+    lines_by_chain_index = {}
+    with open(f_pdb, "r") as f:
+        for line in map(str.rstrip, f.readlines()):
+            match = atom_line.match(line)
+            if not match:
+                continue
+
+            match_dict = match.groupdict()
+            match_chain = match_dict["chain"]
+            match_chain_index = match_dict["chain_index"]
+            if (
+                match_chain in segments_to_keep
+                and int(match_chain_index) in segments_to_keep[match_chain]
+            ):
+                chain_start = match.start("chain_index")
+                chain_end = match.end("chain_index")
+                chain_index_str_len = chain_end - chain_start
+
+                segment_id_start = match.start("segment_id")
+                segment_id_end = match.end("segment_id")
+                segment_id_str_len = segment_id_end - segment_id_start
+
+                new_chain_index = segments_to_keep[match_chain][int(match_chain_index)]
+                if new_chain_index not in lines_by_chain_index:
+                    lines_by_chain_index[new_chain_index] = []
+
+                lines_by_chain_index[new_chain_index].extend(
+                    (
+                        line[:chain_start],
+                        str(
+                            segments_to_keep[match_chain][int(match_chain_index)]
+                        ).rjust(chain_index_str_len),
+                        line[chain_end:segment_id_start],
+                        segment_id.rjust(segment_id_str_len),
+                        line[segment_id_end:],
+                        NEWLINE,
+                    )
+                )
+
+        segmented_pdb = {
+            chain_index: "".join(chain_index_lines)
+            for chain_index, chain_index_lines in lines_by_chain_index.items()
+        }
+
+    return segmented_pdb
+
+
 def get_motif_mask(
     motif_backbones: Dict[str, Dict[str, Tensor]],
     max_n_residues: int,
     contig: str = None,
     return_masked_backbones: bool = False,
 ) -> Union[Tuple[Tensor, Tensor, Dict[str, Tensor]], Tuple[Tensor, Tensor]]:
+    """
+    Get motif coordinates and mask given the backbone of the parent protein
+    and the spec/contig specifying which coordinates to include/design.
+    """
     COMMA = ","
     DASH = "-"
     OFFSET = 1
@@ -194,7 +381,12 @@ def get_motif_mask(
     return motif_mask, mask, out
 
 
-def split_multi_motif_spec(contig: str) -> Dict[str, str]:
+def split_multi_motif_spec(contig: str) -> Dict[str, Dict[str, str]]:
+    """
+    Given a spec/contig for a multi-motif problem (see Genie2 paper),
+    break it down to several single motif specs, grouped by their
+    motif group and their parent protein name.
+    """
     COMMA = ","
     DASH = "-"
 
@@ -216,15 +408,15 @@ def split_multi_motif_spec(contig: str) -> Dict[str, str]:
             continue
 
         motif_chunk = motif_segment.fullmatch(chunk).groupdict()
-        motif = motif_chunk["motif"]
+        motif_name = motif_chunk["motif"]
         chunk_chain = motif_chunk["chain"]
         chunk_range = motif_chunk["range"]
         group_no = int(motif_chunk["group_no"])
 
         if group_no not in per_group_specs:
             per_group_specs[group_no] = {}
-        if motif not in per_group_specs[group_no]:
-            per_group_specs[group_no][motif] = [] + common
+        if motif_name not in per_group_specs[group_no]:
+            per_group_specs[group_no][motif_name] = [] + common
 
         if DASH in chunk_range:
             start, end = map(int, chunk_range.split(DASH))
@@ -236,11 +428,11 @@ def split_multi_motif_spec(contig: str) -> Dict[str, str]:
             for motif_specs in group_specs.values():
                 motif_specs.append(chunk_length)
 
-        per_group_specs[group_no][motif][-1] = chunk_chain + chunk_range
+        per_group_specs[group_no][motif_name][-1] = chunk_chain + chunk_range
 
     for group_specs in per_group_specs.values():
-        for motif, motif_specs in group_specs.items():
-            group_specs[motif] = ",".join(motif_specs)
+        for motif_name, motif_specs in group_specs.items():
+            group_specs[motif_name] = ",".join(motif_specs)
 
     return per_group_specs
 
@@ -248,6 +440,10 @@ def split_multi_motif_spec(contig: str) -> Dict[str, str]:
 def find_all_masks_satisfying_spec(
     contig: str, length_range: Tuple[int, int]
 ) -> Tuple[Tensor, Tensor]:
+    """
+    Find all possible motif masks defined by a spec/contig that
+    satisfy the length range specified.
+    """
     COMMA = ","
     DASH = "-"
     chain_segment = re.compile(
@@ -314,6 +510,13 @@ def _find_solutions(
 def get_motifs_and_masks_for_all_placements(
     mask: Tensor, motif: Tensor, motif_mask: Tensor, contig: str
 ) -> Tuple[Tensor, Tensor]:
+    """
+    In the case where placement of motif is variable, get all possible
+    motif and motif masks that can be made to fit the spec/contig.
+    Note: we use the length of the protein mask as both the min and max
+    possible lengths. As shown in 'get_motif_mask' above, we find the
+    median of each range to determine the overall length.
+    """
     N_RESIDUES = (mask[0] == 1).sum()
     placements, motif_placement_mask = find_all_masks_satisfying_spec(
         contig, (N_RESIDUES, N_RESIDUES)
