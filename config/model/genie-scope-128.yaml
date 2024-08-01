@@ -2,6 +2,7 @@ name: "genie"
 
 f_config: "submodules/genie/weights/scope_l_128/configuration"
 f_weights: "submodules/genie/weights/scope_l_128/epoch=49999.ckpt"
+batch_size: 8
 noise_scale: 0.4
 max_n_residues: 128
 n_timesteps: 1000
