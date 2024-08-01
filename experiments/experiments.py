@@ -414,7 +414,8 @@ def evaluate_samples(cfg: DictConfig) -> None:
 
     pip_dir = os.path.join(os.getcwd(), PATH_TO_PIPELINE_SUBMODULE)
     version = "scaffold" if is_motif_scaffolding else "unconditional"
-    env = dict(os.environ).update({"CUDA_VISIBLE_DEVICES": ENV_CUDA_VISIBLE_DEVICES})
+    env = dict(os.environ)
+    env.update({"CUDA_VISIBLE_DEVICES": ENV_CUDA_VISIBLE_DEVICES})
 
     # Run standard/designability pipeline
     logger.info("Running designability pipeline.")
