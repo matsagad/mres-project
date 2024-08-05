@@ -1,9 +1,11 @@
+import gc
 import logging
 from omegaconf import DictConfig
 import pathlib
 import time
+import torch
 from typing import Callable, Dict
-from utils.path import import_all_files_in_directory
+from utils.path import import_all_files_in_directory, out_dir
 
 EXPERIMENTS_REGISTRY: Dict[str, Callable[[DictConfig], None]] = {}
 
@@ -24,6 +26,9 @@ def register_experiment(name: str) -> Callable:
                 f"%H:%M:%S", time.gmtime(time.time() - t_start)
             )
             logger.info(f"Finished {experiment_name} experiment in {t_elapsed_str}.")
+            logger.info(f"Output folder can be found at: {out_dir()}")
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if name in EXPERIMENTS_REGISTRY:
             raise Exception(f"Experiment '{name}' already registered!")
