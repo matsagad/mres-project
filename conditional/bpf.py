@@ -46,10 +46,8 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self.supports_condition_on_motif = True
         self.supports_condition_on_symmetry = False
 
-        # Order of operations need to be changed for this optimisation
-        # to work, but the two methods require differing orderings.
-        # Keep this false instead to maintain readability.
-        self.model.compute_unique_only = False
+        # Supported only for noised targets conditional method
+        self.model.compute_unique_only = True
 
     def with_config(
         self,
@@ -72,6 +70,8 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self.likelihood_sigma = likelihood_sigma
         self.particle_filter = particle_filter
         self.resample_indices = get_resampling_method(resampling_method)
+
+        self.model.compute_unique_only = conditional_method != BPFMethod.PROJECTION
         return self
 
     def sample_given_motif(
@@ -134,6 +134,7 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         """
         Bootstrap Particle Filter
         """
+        N_COORDS_PER_RESIDUE = 3
         N_BATCHES = self.n_batches
         N_TIMESTEPS = self.model.n_timesteps
         N_MOTIFS = y_mask.shape[0]
@@ -152,17 +153,24 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             y_zero.trans[j, y_mask[j] == 1] -= torch.mean(
                 y_zero.trans[j, y_mask[j] == 1], dim=0, keepdim=True
             )
+
         if self.conditional_method == BPFMethod.NOISED_TARGETS:
+            epsilon = torch.randn(
+                (N_TIMESTEPS, N_RESIDUES * N_COORDS_PER_RESIDUE), device=self.device
+            )
             if self.observed_sequence_method == ObservationGenerationMethod.BACKWARD:
                 # Use noise-sharing for backwards generation case
-                epsilon_T = self.model.sample_frames(mask[:1])
-                x_T = self.model.coords_to_frames(
-                    torch.tile(epsilon_T.trans, (K, 1, 1)), mask
+                _x_T_trans = torch.zeros(
+                    (K, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device
                 )
+                _x_T_trans[:, :N_RESIDUES] = epsilon[-1].view(
+                    1, N_RESIDUES, N_COORDS_PER_RESIDUE
+                )
+                x_T = self.model.coords_to_frames(_x_T_trans, mask)
             else:
                 x_T = self.model.sample_frames(mask)
             y_sequence = self.generate_observed_sequence(
-                mask, y_zero, y_mask, A, x_T, recenter_y=recenter_y
+                mask, y_zero, y_mask, A, epsilon, recenter_y=recenter_y
             )
         else:
             x_T = self.model.sample_frames(mask)
@@ -206,11 +214,11 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
                 ## Compute score to be used in next iteration
                 t_minus_one = t - 1
-                score_t_minus_one = self.model.score(x_t_minus_one, t_minus_one, mask)
+                # score_t_minus_one = self.model.score(x_t_minus_one, t_minus_one, mask)
 
                 if not self.particle_filter:
                     x_t = x_t_minus_one
-                    score_t = score_t_minus_one
+                    # score_t = score_t_minus_one
                     continue
 
                 # Resample particles
@@ -221,6 +229,9 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                     llik_x_t = x_t_minus_one
                     llik_y_t = y_sequence[t[0]]
                 elif self.conditional_method == BPFMethod.PROJECTION:
+                    score_t_minus_one = self.model.score(
+                        x_t_minus_one, t_minus_one, mask
+                    )
                     variance_t = 1 - alpha_bar_t + self.likelihood_sigma**2
                     with self.model.with_score(score_t_minus_one):
                         x_zero_hat = self.model.predict_fully_denoised(
@@ -243,9 +254,17 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                 pf_stats["w"].append(w.cpu())
                 pf_stats["ess"].append(ess.cpu())
 
+                if self.conditional_method == BPFMethod.NOISED_TARGETS:
+                    self.resample(w, ess, [x_t_minus_one.rots, x_t_minus_one.trans])
+                    score_t = self.model.score(x_t_minus_one, t_minus_one, mask)
+                elif self.conditional_method == BPFMethod.PROJECTION:
+                    self.resample(
+                        w,
+                        ess,
+                        [x_t_minus_one.rots, x_t_minus_one.trans, score_t_minus_one],
+                    )
+                    score_t = score_t_minus_one
                 x_t = x_t_minus_one
-                score_t = score_t_minus_one
-                self.resample(w, ess, [x_t.rots, x_t.trans, score_t])
 
         if self.particle_filter:
             self.save_stats(pf_stats)

@@ -123,17 +123,18 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
 
         # (1) Generate sequence {y_t}
-        if self.observed_sequence_method == ObservationGenerationMethod.BACKWARD:
-            epsilon_T = self.model.sample_frames(mask[:1])
-            x_T = self.model.coords_to_frames(
-                torch.tile(epsilon_T.trans, (K, 1, 1)), mask
-            )
-        else:
-            x_T = self.model.sample_frames(mask)
+        epsilon = torch.randn((N_TIMESTEPS, D), device=self.device)
+        _x_T_trans = torch.zeros(
+            (K, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device
+        )
+        _x_T_trans[:, :N_RESIDUES] = epsilon[-1].view(
+            1, N_RESIDUES, N_COORDS_PER_RESIDUE
+        )
+        x_T = self.model.coords_to_frames(_x_T_trans, mask)
 
         y_zero = self.model.coords_to_frames(y, y_mask)
         y_sequence = self.generate_observed_sequence(
-            mask, y_zero, y_mask, A, x_T, recenter_y=recenter_y
+            mask, y_zero, y_mask, A, epsilon, recenter_y=recenter_y
         )
 
         # (2) Generate sequence {x_t}

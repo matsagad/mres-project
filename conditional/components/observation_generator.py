@@ -55,12 +55,11 @@ class LinearObservationGenerator:
         y_zero: Frames,
         y_mask: Tensor,
         A: List[Tensor],
-        x_T: Frames = None,
+        epsilon: Tensor,
         recenter_y: bool = True,
     ) -> List[Tensor]:
         N_TIMESTEPS = self.model.n_timesteps
         N_COORDS_PER_RESIDUE = 3
-        N_RESIDUES = (mask[0] == 1).sum().item()
         N_OBSERVATIONS = y_mask.shape[0]
 
         if self.observed_sequence_method == ObservationGenerationMethod.FORWARD:
@@ -86,9 +85,12 @@ class LinearObservationGenerator:
                 y_t_trans[y_mask == 1] = sqrt_alpha_t * y_t.trans[y_mask == 1]
 
                 if self.observed_sequence_noised:
-                    y_t_trans[y_mask == 1] += sqrt_one_minus_alpha_t * torch.randn(
-                        y_t_trans[y_mask == 1].shape, device=self.device
-                    )
+                    for j in range(N_OBSERVATIONS):
+                        y_t_trans[j, y_mask[j] == 1] += (
+                            self.model.noise_scale
+                            * sqrt_one_minus_alpha_t
+                            * (epsilon[t] @ A[j].T).view(-1, N_COORDS_PER_RESIDUE)
+                        )
                 if recenter_y:
                     for j in range(N_OBSERVATIONS):
                         y_t_trans[j, y_mask[j] == 1] -= torch.mean(
@@ -105,16 +107,16 @@ class LinearObservationGenerator:
             # with the motif and matching the reverse-process for x
             y_T_trans = torch.zeros(y_zero.trans.shape, device=self.device)
             for j in range(len(y_mask)):
-                y_T_trans[j, y_mask[j] == 1] = (
-                    x_T.trans[:1, :N_RESIDUES].flatten() @ A[j].T
-                ).view(1, -1, N_COORDS_PER_RESIDUE)
+                y_T_trans[j, y_mask[j] == 1] = (epsilon[-1] @ A[j].T).view(
+                    1, -1, N_COORDS_PER_RESIDUE
+                )
             y_T = self.model.coords_to_frames(y_T_trans, y_mask)
 
             y_t = y_T
             y_sequence = [y_T]
 
             for i in tqdm(
-                reversed(range(N_TIMESTEPS)),
+                reversed(range(N_TIMESTEPS - 1)),
                 desc="Generating {y_t}",
                 total=N_TIMESTEPS,
                 disable=not self.verbose,
@@ -144,9 +146,11 @@ class LinearObservationGenerator:
 
                 if self.observed_sequence_noised:
                     for j in range(N_OBSERVATIONS):
-                        y_t_minus_one_trans[j, y_mask[j] == 1] += q_t * (
-                            A[j] @ torch.randn((A[j].shape[1],), device=self.device)
-                        ).view(-1, N_COORDS_PER_RESIDUE)
+                        y_t_minus_one_trans[j, y_mask[j] == 1] += (
+                            self.model.noise_scale
+                            * q_t
+                            * (epsilon[t] @ A[j].T).view(-1, N_COORDS_PER_RESIDUE)
+                        )
                 if recenter_y:
                     for j in range(N_OBSERVATIONS):
                         y_t_minus_one_trans[j, y_mask[j] == 1] -= torch.mean(
