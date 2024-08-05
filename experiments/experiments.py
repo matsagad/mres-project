@@ -449,6 +449,8 @@ def evaluate_samples(cfg: DictConfig) -> None:
     diversity_pip.wait()
 
     # Profile results
+    dir_to_profile = out
+
     ## Abide by folder format for profiling scaffolding problems by
     ## temporarily creating a directory of subdirectories to store results
     if is_motif_scaffolding:
@@ -460,6 +462,7 @@ def evaluate_samples(cfg: DictConfig) -> None:
         os.symlink(
             os.path.join(out, "info.csv"), os.path.join(temp_motif_dir, "info.csv")
         )
+        dir_to_profile = temp_dir
 
     ## Note: if designability or diversity is zero, it throws a division by zero
     ## exception when computing for the F1 score
@@ -468,7 +471,7 @@ def evaluate_samples(cfg: DictConfig) -> None:
         [
             "python3",
             f"scripts/analysis/profile_{version}.py",
-            f"--rootdir={temp_dir}",
+            f"--rootdir={dir_to_profile}",
         ],
         cwd=pip_dir,
         env=env,
