@@ -108,8 +108,8 @@ class ConditionalWrapper(ABC):
         SYM_GROUP_DELIM = "-"
         symmetry_group = symmetry.split(SYM_GROUP_DELIM)[0]
 
-        if symmetry_group == "S":
-            # Cyclic symmetry S-n
+        if symmetry_group == "C":
+            # Cyclic symmetry C-n
             N_SYMMETRIES = int(symmetry.split(SYM_GROUP_DELIM)[-1])
             N_RESIDUES_PER_DOMAIN = N_RESIDUES // N_SYMMETRIES
             N_FIXED_RESIDUES = N_RESIDUES_PER_DOMAIN * N_SYMMETRIES

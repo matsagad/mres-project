@@ -1,9 +1,8 @@
-
 defaults:
   - conditional_method: "fpssmc"
 
 name: "sample_given_symmetry"
 n_samples: 16
 sample_length: 128
-symmetry: "S-4"
+symmetry: "C-4"
 keep_coords_trace: False
