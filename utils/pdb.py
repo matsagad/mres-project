@@ -17,7 +17,7 @@ def pdb_to_atom_backbone(
     atom_line = re.compile(
         rf"^ATOM\s*[0-9]+\s*(?P<atom>({'|'.join(atoms)}))"
         + r"\s+[a-zA-Z]+\s+(?P<chain>[a-zA-Z])\s*(?P<chain_index>[0-9]+)\s*"
-        + r"\s+".join(rf"(?P<{label}>[0-9\.\-]+)" for label in LABELS)
+        + r"\s?".join(rf"(?P<{label}>(\-)?[0-9]+\.?[0-9]+\s*)" for label in LABELS)
     )
 
     backbones = {}
@@ -242,11 +242,15 @@ def _get_segmented_motif_pdb_by_index(
             motif_index += 1
 
     LABELS = "xyzot"
+    LABEL_WIDTHS = [8, 8, 8, 6, 6]
     atom_line = re.compile(
-        rf"^ATOM\s*[0-9]+\s*(?P<atom>[a-zA-Z]*)"
-        + r"\s+[a-zA-Z]+\s+(?P<chain>[a-zA-Z])(?P<chain_index>\s*[0-9]+)\s*"
-        + r"\s*".join(rf"(?P<{label}>[0-9\.\-]+)" for label in LABELS)
-        + r"\s+(?P<segment_id>[a-zA-Z]?)\s+(?P<element>[a-zA-Z0-9\+\-])"
+        r"^ATOM\s{2}(?=.{5})(\s*[0-9]*)\s(?=.{4})(?P<atom>\s*[a-zA-Z0-9]*\s*).{1}"
+        + r"(?=.{3})\s*[a-zA-Z]+\s(?P<chain>[a-zA-Z])(?=.{4})(?P<chain_index>\s*[0-9]+).{1}\s{3}"
+        + "".join(
+            rf"(?P<{label}>[\s0-9\.\-]{{{width}}})"
+            for label, width in zip(LABELS, LABEL_WIDTHS)
+        )
+        + r"\s{6}(?=.{4})(?P<segment_id>[a-zA-Z]*\s*)(?P<element>[a-zA-Z0-9])[\s\+\-]?"
     )
 
     lines_by_chain_index = {}
@@ -257,8 +261,8 @@ def _get_segmented_motif_pdb_by_index(
                 continue
 
             match_dict = match.groupdict()
-            match_chain = match_dict["chain"]
-            match_chain_index = match_dict["chain_index"]
+            match_chain = match_dict["chain"].strip()
+            match_chain_index = match_dict["chain_index"].strip()
             if (
                 match_chain in segments_to_keep
                 and int(match_chain_index) in segments_to_keep[match_chain]
@@ -282,7 +286,7 @@ def _get_segmented_motif_pdb_by_index(
                             segments_to_keep[match_chain][int(match_chain_index)]
                         ).rjust(chain_index_str_len),
                         line[chain_end:segment_id_start],
-                        segment_id.rjust(segment_id_str_len),
+                        segment_id.ljust(segment_id_str_len),
                         line[segment_id_end:],
                         NEWLINE,
                     )
