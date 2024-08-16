@@ -1,5 +1,5 @@
 from enum import Enum
-from protein.frames import Frames
+from protein.frames import Frames, compute_frenet_frames
 from torch import Tensor
 import torch
 from typing import Callable, List
@@ -9,12 +9,13 @@ class LikelihoodMethod(str, Enum):
     MASK = "mask"
     MATRIX = "matrix"
     DISTANCE = "distance"
+    FRAME_BASED_DISTANCE = "frame_based_distance"
 
 
 class LikelihoodReduction(Enum):
-    PRODUCT = 1
-    SUM = 2
-    NONE = 3
+    PRODUCT = 1  # Product of experts
+    SUM = 2  # Mixture of experts
+    NONE = 3  # None (for debugging likelihood values)
 
 
 class ParticleFilter:
@@ -164,6 +165,90 @@ class ParticleFilter:
                     ].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
 
                     llik = (-0.5 * ((dist_y - dist_x) ** 2) / variance).sum(dim=1)
+                    log_likelihoods.append(llik)
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
+
+            return log_likelihood
+
+        if likelihood_method == LikelihoodMethod.FRAME_BASED_DISTANCE:
+
+            def log_likelihood(
+                x_t: Frames,
+                y_t: Frames,
+                y_mask: Tensor,
+                variance: float,
+                rot_likelihood_scale: float = 64.0,
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
+            ) -> Tensor:
+                log_likelihoods = []
+                K = x_t.trans.shape[0]
+                x_t_trans_centred = x_t.trans - torch.mean(
+                    x_t.trans, dim=1, keepdim=True
+                )
+                dist_x_full = torch.cdist(x_t_trans_centred, x_t_trans_centred)
+                for i in range(len(y_mask)):
+                    y_t_trans = y_t.trans[i : i + 1]
+                    OBSERVED_REGION = y_mask[i] == 1
+                    N_OBSERVED = torch.sum(OBSERVED_REGION)
+                    _i, _j = torch.triu_indices(N_OBSERVED, N_OBSERVED, offset=1)
+
+                    dist_y = torch.cdist(
+                        y_t_trans[:, OBSERVED_REGION], y_t_trans[:, OBSERVED_REGION]
+                    )[:, _i, _j].view(1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
+                    dist_x = dist_x_full[:, OBSERVED_REGION][:, :, OBSERVED_REGION][
+                        :, _i, _j
+                    ].view(-1, (N_OBSERVED * (N_OBSERVED - 1)) // 2)
+
+                    dist_llik = (-0.5 * ((dist_y - dist_x) ** 2) / variance).sum(dim=1)
+
+                    x_view = x_t_trans_centred[:, OBSERVED_REGION]
+                    y_view = y_t_trans[:, OBSERVED_REGION]
+
+                    x_rot_mats = compute_frenet_frames(
+                        x_view, torch.ones(x_view.shape[:2])
+                    )
+                    y_rot_mats = compute_frenet_frames(
+                        y_view, torch.ones(y_view.shape[:2])
+                    )
+                    # (K, N_OBSERVED, N_OBSERVED, 3, 3)
+                    R_diff_x = torch.einsum(
+                        "ijklm,iknmo->ijnlo",
+                        x_rot_mats.view(K, N_OBSERVED, 1, 3, 3).transpose(3, 4),
+                        x_rot_mats.view(K, 1, N_OBSERVED, 3, 3),
+                    )
+                    # (1, N_OBSERVED, N_OBSERVED, 3, 3)
+                    R_diff_y = torch.einsum(
+                        "ijklm,iknmo->ijnlo",
+                        y_rot_mats.view(1, N_OBSERVED, 1, 3, 3).transpose(3, 4),
+                        y_rot_mats.view(1, 1, N_OBSERVED, 3, 3),
+                    )
+                    # (K, 1, N_OBSERVED, N_OBSERVED, 3, 3)
+                    R_diff_x_y = torch.einsum(
+                        "ijklmn,joklnp->ioklmp",
+                        R_diff_x.view(K, 1, N_OBSERVED, N_OBSERVED, 3, 3),
+                        R_diff_y.view(1, 1, N_OBSERVED, N_OBSERVED, 3, 3).transpose(
+                            4, 5
+                        ),
+                    )
+                    # (K, N_OBSERVED, N_OBSERVED)
+                    cos_angle_diff = (
+                        R_diff_x_y[:, 0, :, :, torch.arange(3), torch.arange(3)].sum(
+                            dim=3
+                        )
+                        - 1
+                    ) / 2
+
+                    rot_llik = (-0.5 * ((cos_angle_diff - 1) ** 2) / variance).sum(
+                        dim=(1, 2)
+                    ) / 2
+                    # Divide by two since rot_llik computes both x1 - x2 and x2 - x1
+
+                    llik = dist_llik + rot_likelihood_scale * rot_llik
                     log_likelihoods.append(llik)
 
                 if reduce == LikelihoodReduction.PRODUCT:
