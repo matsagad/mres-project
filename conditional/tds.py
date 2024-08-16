@@ -19,6 +19,7 @@ class TDSConfig(ConditionalWrapperConfig):
     fixed_motif: bool
     likelihood_method: LikelihoodMethod
     likelihood_sigma: float
+    rot_likelihood_scale: float
     resampling_method: str
     twist_scale: float
 
@@ -43,6 +44,7 @@ class TDS(ConditionalWrapper, ParticleFilter):
         fixed_motif: bool = True,
         likelihood_method: LikelihoodMethod = LikelihoodMethod.MASK,
         likelihood_sigma: float = 0.05,
+        rot_likelihood_scale: float = 64.0,
         resampling_method: str = "residual",
         twist_scale: float = 1.0,
     ) -> "TDS":
@@ -50,6 +52,7 @@ class TDS(ConditionalWrapper, ParticleFilter):
         self.fixed_motif = fixed_motif
         self.likelihood_method = likelihood_method
         self.likelihood_sigma = likelihood_sigma
+        self.rot_likelihood_scale = rot_likelihood_scale
         self.resample_indices = get_resampling_method(resampling_method)
         self.twist_scale = twist_scale
         return self
@@ -79,6 +82,10 @@ class TDS(ConditionalWrapper, ParticleFilter):
             log_likelihood = partial(log_likelihood, A=A)
         if not self.fixed_motif:
             log_likelihood = partial(log_likelihood, reduce=LikelihoodReduction.SUM)
+        if self.likelihood_method == LikelihoodMethod.FRAME_BASED_DISTANCE:
+            log_likelihood = partial(
+                log_likelihood, rot_likelihood_scale=self.rot_likelihood_scale
+            )
 
         return self.sample_conditional(
             mask, motif, motif_mask, log_likelihood, recenter_x=True

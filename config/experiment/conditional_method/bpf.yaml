@@ -8,5 +8,6 @@ observed_sequence_method: "backward"
 observed_sequence_noised: True
 likelihood_method: "mask"
 likelihood_sigma: 0.05
+rot_likelihood_scale: 64.0
 particle_filter: True
 resampling_method: "residual"

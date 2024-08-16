@@ -32,6 +32,7 @@ class BPFConfig(ConditionalWrapperConfig):
     observed_sequence_noised: bool
     likelihood_method: LikelihoodMethod
     likelihood_sigma: float
+    rot_likelihood_scale: float
     particle_filter: bool
     resampling_method: str
 
@@ -58,6 +59,7 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         observed_sequence_noised: bool = True,
         likelihood_method: LikelihoodMethod = LikelihoodMethod.MASK,
         likelihood_sigma: float = 0.05,
+        rot_likelihood_scale: float = 64.0,
         particle_filter: bool = True,
         resampling_method: str = "residual",
     ) -> "BPF":
@@ -68,6 +70,7 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         self.observed_sequence_noised = observed_sequence_noised
         self.likelihood_method = likelihood_method
         self.likelihood_sigma = likelihood_sigma
+        self.rot_likelihood_scale = rot_likelihood_scale
         self.particle_filter = particle_filter
         self.resample_indices = get_resampling_method(resampling_method)
 
@@ -103,6 +106,10 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
         if not self.fixed_motif:
             log_likelihood = partial(log_likelihood, reduce=LikelihoodReduction.SUM)
+        if self.likelihood_method == LikelihoodMethod.FRAME_BASED_DISTANCE:
+            log_likelihood = partial(
+                log_likelihood, rot_likelihood_scale=self.rot_likelihood_scale
+            )
 
         return self.sample_conditional(
             mask, motif, motif_mask, A, log_likelihood, recenter_y=True, recenter_x=True
