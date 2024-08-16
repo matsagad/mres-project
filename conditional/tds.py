@@ -32,7 +32,7 @@ class TDS(ConditionalWrapper, ParticleFilter):
         self.with_config()
 
         self.supports_condition_on_motif = True
-        self.supports_condition_on_symmetry = False
+        self.supports_condition_on_symmetry = True
 
         # TDS does not benefit from having duplicate particles, so
         # can turn this optimisation off to avoid checking uniqueness.
