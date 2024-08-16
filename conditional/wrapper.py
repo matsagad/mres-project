@@ -63,6 +63,13 @@ class ConditionalWrapper(ABC):
         """Sample conditioned on point symmetry"""
         raise NotImplementedError
 
+    @abstractmethod
+    def sample_given_motif_and_symmetry(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+    ) -> Tensor:
+        """Sample conditioned on point symmetry"""
+        raise NotImplementedError
+
     def _general_3d_rot_matrix(self, thetas: Tensor, axis: Tensor) -> Tensor:
         assert len(axis) == 3
         u = axis / (axis**2).sum()
@@ -99,6 +106,7 @@ class ConditionalWrapper(ABC):
     def _get_symmetric_constraints(
         self, mask: Tensor, symmetry: str
     ) -> Tuple[Tensor, Tensor, Tensor]:
+        MAX_N_RESIDUES = mask.shape[1]
         N_RESIDUES = (mask[0] == 1).sum().item()
         N_COORDS_PER_RESIDUE = 3
         x_axis, y_axis, z_axis = torch.eye(3)
@@ -155,9 +163,9 @@ class ConditionalWrapper(ABC):
         assert d <= D
         A[range(d), range(d)] -= 1
 
-        y_mask = torch.zeros((1, N_RESIDUES), device=self.device)
+        y_mask = torch.zeros((1, MAX_N_RESIDUES), device=self.device)
         y_mask[:, :N_FIXED_RESIDUES] = 1
-        y = torch.zeros((1, N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
+        y = torch.zeros((1, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
 
         return A, y, y_mask
 

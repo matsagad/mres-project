@@ -198,3 +198,8 @@ class SMCDiff(ConditionalWrapper, ParticleFilter):
 
     def sample_given_symmetry(self, mask: Tensor, symmetry: str) -> Tensor:
         raise NotImplementedError("")
+
+    def sample_given_motif_and_symmetry(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+    ) -> Tensor:
+        raise NotImplementedError("")

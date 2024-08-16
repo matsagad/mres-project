@@ -1,0 +1,6 @@
+name: 7UHB
+
+path: ./data/symmetric_motif_problems/7UHB.pdb
+contig: K1-55,149
+orientation: [170, 0, 30]
+position: [22.434, -18.613, 0]

@@ -318,7 +318,7 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
 
     # Choose conditional sampler
     cond_cfg = cfg.experiment.conditional_method
-    method = cond_cfg.name
+    method = cond_cfg.method
 
     ## Check method supports sampling symmetry
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
@@ -359,6 +359,143 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
             torch.save(sample_trace, os.path.join(trace_dir, f"trace_{i}.pt"))
 
 
+@register_experiment("sample_given_motif_and_symmetry")
+def sample_given_motif_and_symmetry(cfg: DictConfig) -> None:
+    DASH = "-"
+    # Set-up model
+    model_cfg = cfg.model
+    device = torch.device(model_cfg.device)
+
+    model = get_model(model_cfg)
+
+    # Parse through motif problem configuration
+    motif_cfg = cfg.experiment.symmetric_motif
+    motif_backbones = pdb_to_atom_backbone(motif_cfg.path)
+    _motif_mask, mask, masked_backbones = get_motif_mask(
+        motif_backbones,
+        model.max_n_residues,
+        motif_cfg.contig,
+        return_masked_backbones=True,
+    )
+    motif = masked_backbones["CA"].to(device)
+    motif_mask = _motif_mask.to(device)
+    mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
+
+    # TODO: When supporting T and O, more generally map symmetry group
+    # with the number of symmetries available.
+    n_symmetries = int(cfg.experiment.symmetry.split(DASH)[-1])
+    total_oligomer_len = n_symmetries * (mask[0] == 1).sum()
+
+    assert (
+        total_oligomer_len <= model.max_n_residues
+    ), f"Exceeded maximum number of residues {total_oligomer_len} > {model.max_n_residues}."
+    mask[:, :total_oligomer_len] = 1
+
+    # Choose conditional sampler
+    cond_cfg = cfg.experiment.conditional_method
+    method = cond_cfg.method
+
+    ## Check method supports sampling symmetry
+    conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
+    if not conditional_wrapper.supports_condition_on_symmetry:
+        raise Exception(
+            f"Conditional method {method} does not support conditioning on symmetry."
+        )
+    if hasattr(cond_cfg, "fixed_motif") and not cond_cfg.fixed_motif:
+        raise Exception(
+            "Sampling symmetry does not support variable motif placements. "
+            "Set experiment.conditional_method.fixed_motif=True."
+        )
+
+    # Sample protein conditioned on point symmetry group
+    setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
+    axes = torch.eye(3)
+    for angle, axis in zip(motif_cfg.orientation, axes):
+        rot = setup._general_3d_rot_matrix(
+            torch.tensor([angle]) * (torch.pi / 180), axis
+        )[0].to(device)
+        motif = motif @ rot.T
+
+    motif = motif + torch.tensor(motif_cfg.position, device=device).view(1, 1, 3)
+
+    samples = setup.sample_given_motif_and_symmetry(
+        mask, motif, motif_mask, cfg.experiment.symmetry
+    )
+
+    out = out_dir()
+    # Save samples
+    scaffolds_dir = os.path.join(out, "scaffolds_all_particles")
+    os.makedirs(scaffolds_dir)
+    for i, sample in enumerate(samples[-1]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(scaffolds_dir, f"scaffold_{i}.pdb"),
+        )
+    unique_scaffolds_dir = os.path.join(out, "scaffolds")
+    os.makedirs(unique_scaffolds_dir)
+    n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
+    for i, sample in enumerate(samples[-1][::n_per_batch]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(unique_scaffolds_dir, f"scaffold_{i}.pdb"),
+        )
+
+    # Create multi-motif pdb for evaluation
+    f_pdbs = {motif_cfg.name: motif_cfg.path}
+    unmerged_motif_masks = {
+        i: {
+            motif_cfg.name: motif_mask.roll(
+                i * (total_oligomer_len.item() // n_symmetries), 1
+            )
+        }
+        for i in range(n_symmetries)
+    }
+    group_temp = ",".join(
+        [
+            (
+                f"{motif_cfg.name}/{chunk}" + "{{{group_no}}}"
+                if chunk[0].isalpha()
+                else chunk
+            )
+            for chunk in motif_cfg.contig.split(",")
+        ]
+    )
+    per_group_specs = split_multi_motif_spec(
+        ",".join(group_temp.format(group_no=i) for i in range(n_symmetries))
+    )
+
+    motif_dir = os.path.join(out, "motif")
+    os.makedirs(motif_dir)
+    create_evaluation_multi_motif_pdb(
+        os.path.join(motif_dir, "motif.pdb"),
+        f_pdbs,
+        unmerged_motif_masks,
+        per_group_specs,
+    )
+    atom_backbone_to_pdb(
+        {
+            atom: backbone[:, _motif_mask[0] == 1]
+            for atom, backbone in masked_backbones.items()
+        },
+        os.path.join(motif_dir, "motif_ca.pdb"),
+    )
+
+    with open(os.path.join(motif_dir, "motif_cfg.yaml"), "w") as f:
+        f.write("\n".join(f"{k}: {v}" for k, v in dict(motif_cfg).items()))
+
+    # Save trace of coordinates throughout diffusion process
+    if cfg.experiment.keep_coords_trace:
+        trace_dir = os.path.join(out, "traces")
+        os.makedirs(trace_dir)
+        # [K, T, N_AA, 3]
+        samples_trans = torch.stack(
+            [sample.trans.detach().cpu() for sample in samples]
+        ).swapaxes(0, 1)
+
+        for i, sample_trace in enumerate(samples_trans):
+            torch.save(sample_trace, os.path.join(trace_dir, f"trace_{i}.pt"))
+
+
 @register_experiment("evaluate_samples")
 def evaluate_samples(cfg: DictConfig) -> None:
     PATH_TO_PIPELINE_SUBMODULE = "submodules/insilico_design_pipeline"
@@ -367,7 +504,6 @@ def evaluate_samples(cfg: DictConfig) -> None:
     n_gpus = len(cfg.experiment.gpu_devices)
     n_cpus = cfg.experiment.n_cpus
     ENV_CUDA_VISIBLE_DEVICES = ",".join(map(str, cfg.experiment.gpu_devices))
-    print(ENV_CUDA_VISIBLE_DEVICES)
 
     is_motif_scaffolding = os.path.isdir(os.path.join(path_to_experiment, "motif"))
 

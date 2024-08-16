@@ -92,6 +92,26 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             mask, y, y_mask, [A], recenter_y=False, recenter_x=True
         )
 
+    def sample_given_motif_and_symmetry(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+    ) -> Tensor:
+        N_COORDS_PER_RESIDUE = 3
+        N_MOTIF_RESIDUES = (motif_mask[0] == 1).sum()
+        A, y, y_mask = self._get_symmetric_constraints(mask, symmetry)
+        N_RESIDUES = (mask[0] == 1).sum()
+
+        diag_motif = torch.diag(
+            motif_mask[0, :N_RESIDUES].repeat_interleave(N_COORDS_PER_RESIDUE)
+        )
+        diag_motif = diag_motif[diag_motif.sum(1) > 0]
+
+        A[: N_COORDS_PER_RESIDUE * N_MOTIF_RESIDUES] += diag_motif
+        y[:, :N_MOTIF_RESIDUES] += motif[:, motif_mask[0] == 1]
+
+        return self.sample_conditional(
+            mask, y, y_mask, [A], recenter_y=False, recenter_x=True
+        )
+
     def sample_conditional(
         self,
         mask: Tensor,
@@ -176,10 +196,14 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                         mean.trans[:, OBSERVED_REGION], dim=1
                     ).unsqueeze(1)
 
+                # For numerical stability, add tiny epsilon
+                variance_epsilon = 1e-2 if sigma**2 * alpha_bar_t < 1e-2 else 0
                 covariance_fps_inverse = covariance_inverse + A_T_A / (
-                    sigma**2 * alpha_bar_t
+                    sigma**2 * alpha_bar_t + variance_epsilon
                 )
-                covariance_fps = torch.inverse(covariance_fps_inverse)
+                covariance_fps = torch.inverse(
+                    (sigma**2 * alpha_bar_t + variance_epsilon) * covariance_fps_inverse
+                ) * (sigma**2 * alpha_bar_t + variance_epsilon)
 
                 A_T_y = 0
                 for j in range(len(y_mask)):

@@ -1,0 +1,8 @@
+defaults:
+  - conditional_method: "tds_mask"
+  - symmetric_motif: "7UHB"
+
+name: "sample_given_motif_and_symmetry"
+n_samples: 16
+symmetry: "C-3"
+keep_coords_trace: False

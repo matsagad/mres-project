@@ -128,6 +128,31 @@ class BPF(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
             mask, y, y_mask, [A], log_likelihood, recenter_y=False, recenter_x=True
         )
 
+    def sample_given_motif_and_symmetry(
+        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+    ) -> Tensor:
+        N_MOTIF_RESIDUES = (motif_mask[0] == 1).sum()
+        A, y, y_mask = self._get_symmetric_constraints(mask, symmetry)
+        N_COORDS_PER_RESIDUE = 3
+        N_RESIDUES = (mask[0] == 1).sum()
+
+        diag_motif = torch.diag(
+            motif_mask[0, :N_RESIDUES].repeat_interleave(N_COORDS_PER_RESIDUE)
+        )
+        diag_motif = diag_motif[diag_motif.sum(1) > 0]
+        A[: N_COORDS_PER_RESIDUE * N_MOTIF_RESIDUES] += diag_motif
+        y[:, :N_MOTIF_RESIDUES] = motif[:, motif_mask[0] == 1]
+
+        assert self.likelihood_method == LikelihoodMethod.MATRIX, (
+            f"Likelihood method '{self.likelihood_method}' is not supported for sampling symmetry."
+            f" Make sure to set experiment.conditional_method.likelihood_method='{LikelihoodMethod.MATRIX}'"
+        )
+        log_likelihood = partial(self.get_log_likelihood(self.likelihood_method), A=[A])
+
+        return self.sample_conditional(
+            mask, y, y_mask, [A], log_likelihood, recenter_y=False, recenter_x=True
+        )
+
     def sample_conditional(
         self,
         mask: Tensor,
