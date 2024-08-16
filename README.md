@@ -95,4 +95,5 @@ Configured through the option `experiment={experiment_name}`. Check their argume
 |`sample_given_multiple_motifs`| Sample conditioned on multiple motifs being present on the samples. Motif config files have specifications like in Genie2. |
 |`sample_given_symmetry`| Sample conditioned on the samples following a point symmetry. |
 |`sample_given_motif_and_symmetry`| Sample conditioned on a motif being present in the samples and them following a point symmetry. Motif specification is for a single monomer. |
+|`evaluate_samples`| Evaluate motif scaffolding results using insilico design pipeline. |
 
