@@ -338,12 +338,20 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
 
     out = out_dir()
     # Save samples
-    samples_dir = os.path.join(out, "samples")
+    samples_dir = os.path.join(out, "samples_all_particles")
     os.makedirs(samples_dir)
     for i, sample in enumerate(samples[-1]):
         c_alpha_backbone_to_pdb(
             sample.trans[mask[0] == 1].detach().cpu(),
             os.path.join(samples_dir, f"sample_{i}.pdb"),
+        )
+    unique_samples_dir = os.path.join(out, "samples")
+    os.makedirs(unique_samples_dir)
+    n_per_batch = cfg.experiment.n_samples // cond_cfg.n_batches
+    for i, sample in enumerate(samples[-1][::n_per_batch]):
+        c_alpha_backbone_to_pdb(
+            sample.trans[mask[0] == 1].detach().cpu(),
+            os.path.join(unique_samples_dir, f"sample_{i}.pdb"),
         )
 
     # Save trace of coordinates throughout diffusion process
