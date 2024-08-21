@@ -65,7 +65,12 @@ class ConditionalWrapper(ABC):
 
     @abstractmethod
     def sample_given_motif_and_symmetry(
-        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+        self,
+        mask: Tensor,
+        motif: Tensor,
+        motif_mask: Tensor,
+        symmetry: str,
+        fix_position: bool = False,
     ) -> Tensor:
         """Sample conditioned on point symmetry"""
         raise NotImplementedError
@@ -166,6 +171,46 @@ class ConditionalWrapper(ABC):
         y_mask = torch.zeros((1, MAX_N_RESIDUES), device=self.device)
         y_mask[:, :N_FIXED_RESIDUES] = 1
         y = torch.zeros((1, MAX_N_RESIDUES, N_COORDS_PER_RESIDUE), device=self.device)
+
+        return A, y, y_mask
+
+    def _get_motif_and_symmetry_constraints(
+        self,
+        mask: Tensor,
+        motif: Tensor,
+        motif_mask: Tensor,
+        symmetry: str,
+        fix_position: bool = False,
+    ) -> Tuple[List[Tensor], Tensor, Tensor]:
+        N_MOTIF_RESIDUES = (motif_mask[0] == 1).sum()
+        A_sym, y_sym, y_sym_mask = self._get_symmetric_constraints(mask, symmetry)
+        N_COORDS_PER_RESIDUE = 3
+        N_RESIDUES = (mask[0] == 1).sum()
+
+        if fix_position:
+            diag_motif = torch.diag(
+                motif_mask[0, :N_RESIDUES].repeat_interleave(N_COORDS_PER_RESIDUE)
+            )
+            diag_motif = diag_motif[diag_motif.sum(1) > 0]
+            A_sym[: N_COORDS_PER_RESIDUE * N_MOTIF_RESIDUES] += diag_motif
+            y_sym[:, :N_MOTIF_RESIDUES] = motif[:, motif_mask[0] == 1]
+            A = [A_sym]
+            y = y_sym
+            y_mask = y_sym_mask
+        else:
+            d = N_MOTIF_RESIDUES * N_COORDS_PER_RESIDUE
+            D = N_RESIDUES * N_COORDS_PER_RESIDUE
+
+            motif_indices_flat = torch.where(
+                torch.repeat_interleave(
+                    motif_mask[0, :N_RESIDUES] == 1, N_COORDS_PER_RESIDUE
+                )
+            )[0]
+            A_motif = torch.zeros((d, D), device=self.device)
+            A_motif[range(d), motif_indices_flat] = 1
+            A = [A_sym, A_motif]
+            y = torch.cat([y_sym, motif])
+            y_mask = torch.cat([y_sym_mask, motif_mask])
 
         return A, y, y_mask
 

@@ -5,4 +5,5 @@ defaults:
 name: "sample_given_motif_and_symmetry"
 n_samples: 16
 symmetry: "C-3"
+fix_position: False
 keep_coords_trace: False

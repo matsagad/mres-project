@@ -93,23 +93,19 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         )
 
     def sample_given_motif_and_symmetry(
-        self, mask: Tensor, motif: Tensor, motif_mask: Tensor, symmetry: str
+        self,
+        mask: Tensor,
+        motif: Tensor,
+        motif_mask: Tensor,
+        symmetry: str,
+        fix_position: bool = False,
     ) -> Tensor:
-        N_COORDS_PER_RESIDUE = 3
-        N_MOTIF_RESIDUES = (motif_mask[0] == 1).sum()
-        A, y, y_mask = self._get_symmetric_constraints(mask, symmetry)
-        N_RESIDUES = (mask[0] == 1).sum()
-
-        diag_motif = torch.diag(
-            motif_mask[0, :N_RESIDUES].repeat_interleave(N_COORDS_PER_RESIDUE)
+        A, y, y_mask = self._get_motif_and_symmetry_constraints(
+            mask, motif, motif_mask, symmetry, fix_position
         )
-        diag_motif = diag_motif[diag_motif.sum(1) > 0]
-
-        A[: N_COORDS_PER_RESIDUE * N_MOTIF_RESIDUES] += diag_motif
-        y[:, :N_MOTIF_RESIDUES] += motif[:, motif_mask[0] == 1]
 
         return self.sample_conditional(
-            mask, y, y_mask, [A], recenter_y=False, recenter_x=True
+            mask, y, y_mask, A, recenter_y=False, recenter_x=True
         )
 
     def sample_conditional(
@@ -138,6 +134,7 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         ), f"Number of batches {N_BATCHES} does not divide number of particles {K}"
         sigma = self.likelihood_sigma
 
+        # OBSERVED_REGION = torch.sum(y_mask, dim=0) != 0
         OBSERVED_REGION = y_mask[0] == 1
         N_RESIDUES = (mask[0] == 1).sum().item()
         D = N_RESIDUES * N_COORDS_PER_RESIDUE
@@ -171,6 +168,7 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
 
         A_cat = torch.cat(A, dim=0)
         A_T_A = A_cat.T @ A_cat
+        small_covariance_epsilon = 1e-6 * torch.eye(A_T_A.shape[0], device=self.device)
 
         with torch.no_grad():
             for i in tqdm(
@@ -196,14 +194,18 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                         mean.trans[:, OBSERVED_REGION], dim=1
                     ).unsqueeze(1)
 
-                # For numerical stability, add tiny epsilon
-                variance_epsilon = 1e-2 if sigma**2 * alpha_bar_t < 1e-2 else 0
-                covariance_fps_inverse = covariance_inverse + A_T_A / (
-                    sigma**2 * alpha_bar_t + variance_epsilon
+                variance_scale = sigma**2 * alpha_bar_t
+                covariance_fps_inverse = covariance_inverse + A_T_A / variance_scale
+                covariance_fps = variance_scale * torch.inverse(
+                    variance_scale * covariance_fps_inverse + small_covariance_epsilon
                 )
-                covariance_fps = torch.inverse(
-                    (sigma**2 * alpha_bar_t + variance_epsilon) * covariance_fps_inverse
-                ) * (sigma**2 * alpha_bar_t + variance_epsilon)
+
+                # For positive definiteness check, add tiny epsilon
+                variance_epsilon = 1e-2 if sigma**2 * alpha_bar_t < 1e-2 else 0
+                variance_scale_stable = sigma**2 * alpha_bar_t + variance_epsilon
+                covariance_fps_stable = variance_scale_stable * torch.inverse(
+                    variance_scale_stable * covariance_inverse + A_T_A
+                )
 
                 A_T_y = 0
                 for j in range(len(y_mask)):
@@ -221,7 +223,7 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
                 ) @ covariance_fps.T
 
                 mvn = torch.distributions.MultivariateNormal(
-                    mean_fps, (self.model.noise_scale**2) * covariance_fps
+                    mean_fps, (self.model.noise_scale**2) * covariance_fps_stable
                 )
 
                 x_bar_t_trans = torch.empty(

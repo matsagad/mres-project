@@ -313,8 +313,11 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
 
     model = get_model(model_cfg)
 
+    n_symmetries = int(cfg.experiment.symmetry.split("-")[-1])
+    total_length = n_symmetries * (cfg.experiment.sample_length // n_symmetries)
+
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
-    mask[:, : cfg.experiment.sample_length] = 1
+    mask[:, :total_length] = 1
 
     # Choose conditional sampler
     cond_cfg = cfg.experiment.conditional_method
@@ -423,11 +426,12 @@ def sample_given_motif_and_symmetry(cfg: DictConfig) -> None:
             torch.tensor([angle]) * (torch.pi / 180), axis
         )[0].to(device)
         motif = motif @ rot.T
-
-    motif = motif + torch.tensor(motif_cfg.position, device=device).view(1, 1, 3)
+    
+    if cfg.experiment.fix_position:
+        motif = motif + torch.tensor(motif_cfg.position, device=device).view(1, 1, 3)
 
     samples = setup.sample_given_motif_and_symmetry(
-        mask, motif, motif_mask, cfg.experiment.symmetry
+        mask, motif, motif_mask, cfg.experiment.symmetry, cfg.experiment.fix_position
     )
 
     out = out_dir()
@@ -458,10 +462,11 @@ def sample_given_motif_and_symmetry(cfg: DictConfig) -> None:
         }
         for i in range(n_symmetries)
     }
+    motif_name = motif_cfg.path.split("/")[-1].split(".")[0]
     group_temp = ",".join(
         [
             (
-                f"{motif_cfg.name}/{chunk}" + "{{{group_no}}}"
+                f"{motif_name}/{chunk}" + "{{{group_no}}}"
                 if chunk[0].isalpha()
                 else chunk
             )
