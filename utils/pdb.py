@@ -368,10 +368,10 @@ def get_motif_mask(
             curr_pos += scaffold_segment_length
 
         assert (
-            curr_pos + 1 <= max_n_residues
-        ), f"Exceeded experiment's maximum number of residues: ({curr_pos + 1} > {max_n_residues})"
+            curr_pos <= max_n_residues
+        ), f"Exceeded experiment's maximum number of residues: ({curr_pos} > {max_n_residues})"
 
-    mask[:, : curr_pos + 1] = 1
+    mask[:, : curr_pos] = 1
     if not return_masked_backbones:
         return motif_mask, mask
 
