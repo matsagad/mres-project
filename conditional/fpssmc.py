@@ -105,7 +105,7 @@ class FPSSMC(ConditionalWrapper, ParticleFilter, LinearObservationGenerator):
         )
 
         return self.sample_conditional(
-            mask, y, y_mask, A, recenter_y=False, recenter_x=True
+            mask, y, y_mask, A, recenter_y=(not fix_position), recenter_x=True
         )
 
     def sample_conditional(
