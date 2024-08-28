@@ -45,13 +45,18 @@ def compute_frenet_frames(x: Tensor, mask: Tensor, eps: float = 1e-10) -> Tensor
 
     rots = []
     for i in range(mask.shape[0]):
-        _rots = torch.eye(3).unsqueeze(0).repeat(mask.shape[1], 1, 1).clone()
         length = torch.sum(mask[i]).int()
 
-        _rots[0] = tbn[i, 0]
-        _rots[1 : length - 1] = tbn[i, : length - 2]
-        _rots[length - 1] = tbn[i, length - 3]
-
+        _rots = torch.cat(
+            [
+                tbn[i, :1].clone(),
+                tbn[i, : length - 2],
+                tbn[i, length - 3 : length - 2].clone(),
+                torch.eye(3, device=x.device)
+                .unsqueeze(0)
+                .repeat(mask.shape[1] - length, 1, 1),
+            ]
+        )
         rots.append(_rots)
     rots = torch.stack(rots, dim=0).to(x.device)
 
