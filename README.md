@@ -24,6 +24,18 @@ The following are the supported tasks, samplers, and likelihood formalisations f
 - Frame-based distance
     - Condition on the pairwise residue distances and pair-wise residue rotation matrix deviations from the rigid body frame representation.
 
+## Installation
+
+To match our setup, use Python 3.9 with CUDA version 11.8 and above. First, pip install the requirements.
+```bash
+pip install -r requirements.txt
+```
+Then, initialise the submodules if not already setup.
+```bash
+git submodule update --init
+```
+Finally, but optionally, we use the [insilico design pipeline](https://github.com/aqlaboratory/insilico_design_pipeline/tree/main) from AQLaboratory for evaluation. Run their bash scripts for installing TMScore, ProteinMPNN, and ESMFold to set up the self-consistency pipeline.
+
 ## Structure
 
 ```
@@ -97,3 +109,68 @@ Configured through the option `experiment={experiment_name}`. Check their argume
 |`sample_given_motif_and_symmetry`| Sample conditioned on a motif being present in the samples and them following a point symmetry. Motif specification is for a single monomer. |
 |`evaluate_samples`| Evaluate motif scaffolding results using insilico design pipeline. |
 
+### Examples
+
+Sample 16 proteins with 96 residues each using unconditional model Genie-SCOPe-128 (default if unspecified) on GPU device #1.
+```bash
+python3 main.py experiment=sample_unconditional \
+    experiment.n_samples=16 \
+    experiment.sample_length=96 \
+    model=genie-scope-128 \
+    model.device=cuda:1
+```
+
+Scaffold motif problem 3IXT using TDS with masking likelihood, twist scale=2.0, and K=8 particles.
+```bash
+python3 main.py experiment=sample_given_motif \
+    experiment/motif=3IXT \
+    experiment/conditional_method=tds-mask \
+    experiment.conditional_method.twist_scale=2.0 \
+    experiment.n_samples=8
+```
+
+Produce 16 scaffolds for motif problem 1PRW using TDS with distance likelihood and K=8 particles.
+```bash
+python3 main.py experiment=sample_given_motif \
+    experiment/motif=1PRW \
+    experiment/conditional_method=tds-distance \
+    experiment.conditional_method.n_batches=16
+    experiment.n_samples=128
+```
+
+Scaffold motif problem 5TPN, allowing the motif to be placed anywhere, using TDS with masking likelihood and K=8 particles.
+```bash
+python3 main.py experiment=sample_given_motif \
+    experiment/motif=5TPN \
+    experiment.fixed_motif=False \
+    experiment/conditional_method=tds-mask \
+    experiment.n_samples=8
+```
+
+Scaffold multi-motif problem 1PRW_two using TDS with frame-based distance likelihood and K=8 particles.
+```bash
+python3 main.py experiment=sample_given_multiple_motifs \
+    experiment/multi_motif=1PRW_two \
+    experiment/conditional_method=tds-frame-distance \
+    experiment.n_samples=8 \
+    model=genie-scope-256
+```
+
+Sample a monomer with 250 residues and C-5 internal symmetry using FPS-SMC with K=16 particles.
+```bash
+python3 main.py experiment=sample_given_symmetry \
+    model=genie-scope-256 \
+    experiment.sample_length=250 \
+    experiment.symmetry=C-5 \
+    experiment/conditional_method=fpssmc \
+    experiment.n_samples=16
+```
+
+Evaluate samples from unconditional, single-motif scaffolding, or multi-motif scaffolding experiments using the insilico design pipeline with CUDA visible devices #0, #2, and #3
+```bash
+python3 main.py experiment=evaluate_samples \
+    experiment.path_to_experiment=<path_to_hydra_output_folder> \
+    experiment.gpu_devices=\[0, 2, 3\]
+```
+
+Each of the conditional methods and models have their own default hyperparameters which can be overwritten in the command-line. Check out their config files for more info. Custom motifs can also be scaffolded by creating a config file in `configs/experiment/motif` following the specification of configs in that directory. The case is similar with multiple motifs, except they are stored in `configs/experiment/multi_motif`.
