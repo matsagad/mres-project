@@ -22,6 +22,7 @@ from utils.pdb import (
     create_evaluation_motif_pdb,
     create_evaluation_multi_motif_pdb,
 )
+from utils.symmetry import get_n_symmetries
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +314,7 @@ def sample_given_symmetry(cfg: DictConfig) -> None:
 
     model = get_model(model_cfg)
 
-    n_symmetries = int(cfg.experiment.symmetry.split("-")[-1])
+    n_symmetries = get_n_symmetries(cfg.experiment.symmetry)
     total_length = n_symmetries * (cfg.experiment.sample_length // n_symmetries)
 
     mask = torch.zeros((cfg.experiment.n_samples, model.max_n_residues), device=device)
@@ -392,9 +393,7 @@ def sample_given_motif_and_symmetry(cfg: DictConfig) -> None:
     motif_mask = _motif_mask.to(device)
     mask = torch.tile(mask, (cfg.experiment.n_samples, 1)).to(device)
 
-    # TODO: When supporting T and O, more generally map symmetry group
-    # with the number of symmetries available.
-    n_symmetries = int(cfg.experiment.symmetry.split(DASH)[-1])
+    n_symmetries = get_n_symmetries(cfg.experiment.symmetry)
     total_oligomer_len = n_symmetries * (mask[0] == 1).sum()
 
     assert (
@@ -426,7 +425,7 @@ def sample_given_motif_and_symmetry(cfg: DictConfig) -> None:
             torch.tensor([angle]) * (torch.pi / 180), axis
         )[0].to(device)
         motif = motif @ rot.T
-    
+
     if cfg.experiment.fix_position:
         motif = motif + torch.tensor(motif_cfg.position, device=device).view(1, 1, 3)
 
