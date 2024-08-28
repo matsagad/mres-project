@@ -1,0 +1,10 @@
+name: "tds-frame-distance"
+
+method: "tds"
+n_batches: 1
+fixed_motif: True
+likelihood_method: "frame_based_distance"
+likelihood_sigma: 0.05
+resampling_method: "residual"
+twist_scale: 0.25
+rot_likelihood_scale: 64.0
