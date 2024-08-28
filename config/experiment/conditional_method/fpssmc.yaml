@@ -3,7 +3,7 @@ name: "fpssmc"
 method: "fpssmc"
 n_batches: 1
 fixed_motif: True
-likelihood_sigma: 0.1
+likelihood_sigma: 0.05
 observed_sequence_method: "backward"
 observed_sequence_noised: True
 particle_filter: True
