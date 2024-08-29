@@ -1,6 +1,6 @@
-# MRes Project
+## Diffusion Posterior Sampling via SMC for Zero-Shot Scaffolding of Protein Motifs
 
-This repository provides an interface for solving motif scaffolding problems. It defines inverse problems for a variety of tasks and performs diffusion posterior sampling via sequential Monte Carlo to solve them. This permits conditional sampling without additional training to an unconditional diffusion model for protein backbones.
+This repository provides an interface for solving motif scaffolding problems with an unconditional diffusion model as a prior. It defines inverse problems for a variety of tasks and solves them by sampling the posterior via sequential Monte Carlo. This permits conditional sampling without additional training to the chosen unconditional model.
 
 The following are the supported tasks, samplers, and likelihood formalisations for conditioning on a motif.
 
@@ -20,9 +20,11 @@ The following are the supported tasks, samplers, and likelihood formalisations f
 - Masking (as done by previous methods)
     - Condition on a partial view of the backbone with a fixed orientation.
 - Distance
-    - Condition on the pairwise residue distances.
+    - Condition on the pairwise residue distances (but is reflection-invariant).
 - Frame-based distance
     - Condition on the pairwise residue distances and pair-wise residue rotation matrix deviations from the rigid body frame representation.
+
+Additionally, other unconditional models can be supported by creating an adapter for them in `model`, registering them and their parameters, and adding a config in `config/model`. Currently, we have [Genie-SCOPe-128 and Genie-SCOPe-256](https://github.com/aqlaboratory/genie) available. The conditional samplers assume the frame representation of the protein, so some extra engineering may be required for other models.
 
 ## Installation
 
@@ -84,7 +86,8 @@ Finally, but optionally, we use the [insilico design pipeline](https://github.co
 │   ├── path.py                         # for resolving paths
 │   ├── pdb.py                          # for working with PDBs
 │   ├── registry.py                     # for handling registrations
-│   └── resampling.py                   # for low-variance resampling
+│   ├── resampling.py                   # for low-variance resampling
+│   └── symmetry.py                     # for dealing with symmetry
 └── main.py                         # Main entry point
 ```
 
