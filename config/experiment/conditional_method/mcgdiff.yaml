@@ -1,0 +1,6 @@
+name: "mcgdiff"
+
+method: "mcgdiff"
+n_batches: 1
+particle_filter: True
+resampling_method: "residual"
