@@ -15,6 +15,7 @@ The following are the supported tasks, samplers, and likelihood formalisations f
 - SMCDiff [(Trippe _et al._, 2023)](https://arxiv.org/pdf/2206.04119)
 - Filtering Posterior Sampling [(Dou & Song, 2024)](https://openreview.net/pdf?id=tplXNcHZs1)
 - Twisted Diffusion Sampler [(Wu _et al._, 2023)](https://arxiv.org/pdf/2306.17775)
+- Monte Carlo Guided Diffusion [(Cardoso _et al._, 2023)](https://openreview.net/pdf?id=nHESwXvxWK)
 
 ### Motif Scaffolding Likelihood Formalisations
 - Masking (as done by previous methods)
