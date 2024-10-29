@@ -92,7 +92,7 @@ class MCGDiff(ConditionalWrapper, ParticleFilter):
         w = torch.ones((N_BATCHES, K_batch), device=self.device) / K_batch
         ess = torch.zeros(N_BATCHES, device=self.device)
 
-        log_likelihood = self.get_log_likelihood(LikelihoodMethod.FRAME_MASK)
+        log_likelihood = self.get_log_likelihood(LikelihoodMethod.MASK)
 
         for i in tqdm(
             reversed(range(N_TIMESTEPS - 1)),
