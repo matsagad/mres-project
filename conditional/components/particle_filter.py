@@ -1,5 +1,6 @@
 from enum import Enum
 from protein.frames import Frames, compute_frenet_frames
+from protein.alignment import rmsd_kabsch
 from torch import Tensor
 import torch
 from typing import Callable, List
@@ -10,6 +11,8 @@ class LikelihoodMethod(str, Enum):
     MATRIX = "matrix"
     DISTANCE = "distance"
     FRAME_BASED_DISTANCE = "frame_based_distance"
+    RMSD = "rmsd"
+    FAPE = "fape"
 
 
 class LikelihoodReduction(Enum):
@@ -250,6 +253,83 @@ class ParticleFilter:
 
                     llik = dist_llik + rot_likelihood_scale * rot_llik
                     log_likelihoods.append(llik)
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
+
+            return log_likelihood
+
+        if likelihood_method == LikelihoodMethod.RMSD:
+
+            def log_likelihood(
+                x_t: Frames,
+                y_t: Frames,
+                y_mask: Tensor,
+                variance: float,
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
+            ) -> Tensor:
+                log_likelihoods = []
+                for i in range(len(y_mask)):
+                    OBSERVED_REGION = y_mask[i] == 1
+                    rmsd = rmsd_kabsch(
+                        x_t.trans[:, OBSERVED_REGION],
+                        y_t.trans[i : i + 1, OBSERVED_REGION],
+                    )
+                    log_likelihoods.append(
+                        -0.5 * OBSERVED_REGION.sum() * (rmsd**2) / variance
+                    )
+
+                if reduce == LikelihoodReduction.PRODUCT:
+                    return sum(log_likelihoods)
+                if reduce == LikelihoodReduction.SUM:
+                    return torch.logsumexp(torch.stack(log_likelihoods), dim=0)
+                return torch.stack(log_likelihoods)
+
+            return log_likelihood
+
+        if likelihood_method == LikelihoodMethod.FAPE:
+
+            def log_likelihood(
+                x_t: Frames,
+                y_t: Frames,
+                y_mask: Tensor,
+                variance: float,
+                reduce: LikelihoodReduction = LikelihoodReduction.PRODUCT,
+            ) -> Tensor:
+                log_likelihoods = []
+                for i in range(len(y_mask)):
+                    OBSERVED_REGION = y_mask[i] == 1
+                    y_t_trans = y_t.trans[i : i + 1, OBSERVED_REGION]
+                    x_t_trans = x_t.trans[:, OBSERVED_REGION]
+
+                    y_t_rots = compute_frenet_frames(
+                        y_t_trans, torch.ones(y_t_trans.shape[:2])
+                    )
+                    x_t_rots = compute_frenet_frames(
+                        x_t_trans, torch.ones(x_t_trans.shape[:2])
+                    )
+
+                    y_t_trans_diff = y_t_trans.unsqueeze(1) - y_t_trans.unsqueeze(2)
+                    x_t_trans_diff = x_t_trans.unsqueeze(1) - x_t_trans.unsqueeze(2)
+
+                    y_res = torch.einsum("ijlk,ijml->ijmk", y_t_rots, y_t_trans_diff)
+                    x_res = torch.einsum("ijlk,ijml->ijmk", x_t_rots, x_t_trans_diff)
+
+                    loss_fape = (
+                        -0.5
+                        * (
+                            torch.sum(
+                                (x_res - y_res) ** 2,
+                                dim=(1, 2, 3),
+                            )
+                            / OBSERVED_REGION.sum()
+                        )
+                        / variance
+                    )
+                    log_likelihoods.append(loss_fape)
 
                 if reduce == LikelihoodReduction.PRODUCT:
                     return sum(log_likelihoods)
