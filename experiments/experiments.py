@@ -224,8 +224,17 @@ def sample_given_multiple_motifs(cfg: DictConfig) -> None:
     check_valid_method(method)
     conditional_wrapper, config_resolver = CONDITIONAL_METHOD_REGISTRY[method]
 
-    # Sample given multiple motifs
+    # Prepare setup
     setup = conditional_wrapper(model).with_config(**config_resolver(cond_cfg))
+
+    # Randomly orient motifs if masking approach chosen
+    if cfg.experiment.randomly_orient_motifs_if_mask and (
+        cond_cfg.method != "tds" or cond_cfg.likelihood_method == "mask"
+    ):
+        R_random = setup.get_random_3d_rot_matrix(len(motifs))
+        motifs = motifs @ R_random.transpose(1, 2).to(device)
+
+    # Sample given multiple motifs
     samples = setup.sample_given_motif(mask, motifs, motif_masks)
 
     out = out_dir()

@@ -1,5 +1,5 @@
 defaults:
-  - conditional_method: "smcdiff"
+  - conditional_method: "bpf"
   - multi_motif: "4JHW+5WN9"
 
 sweep_dir: "multirun\
@@ -8,3 +8,4 @@ sweep_dir: "multirun\
 name: "sample_given_multiple_motifs"
 n_samples: 16
 keep_coords_trace: False
+randomly_orient_motifs_if_mask: True

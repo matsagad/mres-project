@@ -108,6 +108,21 @@ class ConditionalWrapper(ABC):
 
         return R
 
+    def get_random_3d_rot_matrix(self, n: int) -> Tensor:
+        z_axis = torch.eye(3)[-1]
+        u1, u2, u3 = torch.rand((3, n))
+
+        R_z = self._general_3d_rot_matrix(2 * torch.pi * u1, z_axis)
+        v = torch.stack(
+            [
+                torch.cos(2 * torch.pi * u2) * torch.sqrt(u3),
+                torch.sin(2 * torch.pi * u2) * torch.sqrt(u3),
+                torch.sqrt(1 - u3),
+            ]
+        ).T
+        H = torch.eye(3).unsqueeze(0) - 2 * v.unsqueeze(2) @ v.unsqueeze(1)
+        return -H @ R_z
+
     def _get_symmetric_constraints(
         self, mask: Tensor, symmetry: str
     ) -> Tuple[Tensor, Tensor, Tensor]:
