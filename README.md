@@ -10,20 +10,24 @@ The following are the supported tasks, samplers, and likelihood formalisations f
 - Symmetric motif scaffolding
 - Inpainting/scaffolding with degrees of freedom
 
-### (Diffusion) Posterior Sampling Methods
+### (SMC-Aided) Diffusion Posterior Sampling Methods
 - Bootstrap Particle Filter
 - SMCDiff [(Trippe _et al._, 2023)](https://arxiv.org/pdf/2206.04119)
 - Filtering Posterior Sampling [(Dou & Song, 2024)](https://openreview.net/pdf?id=tplXNcHZs1)
 - Twisted Diffusion Sampler [(Wu _et al._, 2023)](https://arxiv.org/pdf/2306.17775)
 - Monte Carlo Guided Diffusion [(Cardoso _et al._, 2023)](https://openreview.net/pdf?id=nHESwXvxWK)
 
-### Motif Scaffolding Likelihood Formalisations
-- Masking (as done by previous methods)
+### Motif Scaffolding Guidance Potentials/Likelihoods
+- Masking
     - Condition on a partial view of the backbone with a fixed orientation.
 - Distance
-    - Condition on the pairwise residue distances (but is reflection-invariant).
-- Frame-based distance
-    - Condition on the pairwise residue distances and pair-wise residue rotation matrix deviations from the rigid body frame representation.
+    - Condition on pairwise residue distances.
+- Frame distance
+    - Condition on pairwise residue distances and rotation matrix deviations from the frame representation.
+- Frame-aligned point error
+    - Condition on several partial views of the backbone, each aligned to meet the motif at a different residue index.
+- (Root mean) squared deviation
+    - Condition on a partial view of the backbone, oriented to have minimal deviation from the motif.
 
 Additionally, other unconditional models can be supported by creating an adapter for them in `model`, registering them and their parameters, and adding a config in `config/model`. Currently, we have [Genie-SCOPe-128 and Genie-SCOPe-256](https://github.com/aqlaboratory/genie) available. The conditional samplers assume the frame representation of the protein, so some extra engineering may be required for other models.
 
